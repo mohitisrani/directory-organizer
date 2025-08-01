@@ -6,7 +6,8 @@
   "scripts": {
     "dev:react": "vite",
     "dev:electron": "wait-on tcp:5173 && electron .",
-    "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\""
+    "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
+    "postinstall": "electron-rebuild"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",

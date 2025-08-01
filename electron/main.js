@@ -1,5 +1,5 @@
 // electron/main.js
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
@@ -66,4 +66,32 @@ ipcMain.handle('pick-and-add-document', async () => {
   const newDoc = db.prepare('SELECT * FROM documents ORDER BY id DESC LIMIT 1').get();
   mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
   return newDoc;
+});
+
+
+// ✅ Pick a directory and add all files to DB
+ipcMain.handle('pick-directory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return;
+
+  const dirPath = result.filePaths[0];
+  const files = fs.readdirSync(dirPath).map(file => ({
+    name: file,
+    path: path.join(dirPath, file),
+  }));
+
+  // Insert files into DB using better-sqlite3
+  const insert = db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)');
+  const docs = [];
+  for (const file of files) {
+    insert.run(file.name, file.path);
+    docs.push({ name: file.name, path: file.path });
+  }
+
+  return docs;
+});
+
+// ✅ Show a file in Finder/Explorer
+ipcMain.handle('show-in-finder', async (_, filePath) => {
+  shell.showItemInFolder(filePath);
 });
