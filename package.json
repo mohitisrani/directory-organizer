@@ -1,0 +1,23 @@
+{
+  "name": "document-organizer",
+  "version": "0.0.1",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev:react": "vite",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "electron": "^29.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.0",
+    "concurrently": "^8.0.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.0.0"
+  }
+}
