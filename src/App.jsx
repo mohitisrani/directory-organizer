@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 
 function App() {
   const [documents, setDocuments] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
 
   const fetchDocuments = async () => {
     const docs = await window.electron.invoke('get-documents');
@@ -11,25 +12,23 @@ function App() {
   const addDocumentFromFile = async () => {
     const newDoc = await window.electron.invoke('pick-and-add-document');
     if (!newDoc) return;
-
-    if (newDoc.duplicate) {
-      alert(`⚠ ${newDoc.name} is already in the database.`);
-    } else {
-      fetchDocuments();
-    }
+    if (newDoc.duplicate) alert(`⚠ ${newDoc.name} is already in the database.`);
   };
 
   const pickDirectory = async () => {
     await window.electron.invoke('pick-directory');
-    // Auto-update handled by 'documents-updated' event
   };
 
-  const showInFinder = async (filePath) => {
-    await window.electron.invoke('show-in-finder', filePath);
+  const showInFinder = (filePath) => {
+    window.electron.invoke('show-in-finder', filePath);
   };
 
-  const deleteDocument = async (id) => {
-    await window.electron.invoke('delete-document', id);
+  const openFile = (filePath) => {
+    window.electron.invoke('open-file', filePath);
+  };
+
+  const deleteDocument = (id) => {
+    window.electron.invoke('delete-document', id);
   };
 
   useEffect(() => {
@@ -39,41 +38,70 @@ function App() {
     });
   }, []);
 
+  const filteredDocs = documents.filter(
+    (doc) =>
+      doc.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      doc.path.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  const formatSize = (size) => {
+    if (!size) return '-';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   return (
     <div style={{ padding: 20 }}>
       <h1>📂 Document Organizer</h1>
 
-      <button onClick={addDocumentFromFile} style={{ marginRight: 10 }}>
-        📄 Add Document From File
-      </button>
+      <div style={{ marginBottom: 10 }}>
+        <button onClick={addDocumentFromFile} style={{ marginRight: 10 }}>
+          📄 Add File
+        </button>
+        <button onClick={pickDirectory}>
+          📁 Add Directory (Recursive)
+        </button>
+      </div>
 
-      <button onClick={pickDirectory}>
-        📁 Add All Files from Directory
-      </button>
+      <input
+        type="text"
+        placeholder="🔍 Search..."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        style={{ marginBottom: 20, padding: 5, width: 300 }}
+      />
 
-      <h2>Stored Documents:</h2>
-      {documents.length === 0 ? (
-        <p>No documents yet.</p>
+      <h2>Stored Documents ({filteredDocs.length}):</h2>
+      {filteredDocs.length === 0 ? (
+        <p>No matching documents.</p>
       ) : (
-        <ul>
-          {documents.map((doc) => (
-            <li key={doc.id}>
-              <strong>{doc.name}</strong> — <span>{doc.path}</span>
-              <button 
-                onClick={() => showInFinder(doc.path)} 
-                style={{ marginLeft: 10 }}
-              >
-                🔍 Show in Finder
-              </button>
-              <button 
-                onClick={() => deleteDocument(doc.id)} 
-                style={{ marginLeft: 10 }}
-              >
-                🗑 Delete
-              </button>
-            </li>
-          ))}
-        </ul>
+        <table border="1" cellPadding="5" style={{ borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Path</th>
+              <th>Size</th>
+              <th>Last Modified</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredDocs.map((doc) => (
+              <tr key={doc.id}>
+                <td>{doc.name}</td>
+                <td>{doc.path}</td>
+                <td>{formatSize(doc.size)}</td>
+                <td>{doc.lastModified || '-'}</td>
+                <td>
+                  <button onClick={() => showInFinder(doc.path)}>🔍</button>
+                  <button onClick={() => openFile(doc.path)} style={{ marginLeft: 5 }}>▶</button>
+                  <button onClick={() => deleteDocument(doc.id)} style={{ marginLeft: 5 }}>🗑</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );

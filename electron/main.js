@@ -17,15 +17,17 @@ function initDB() {
     CREATE TABLE IF NOT EXISTS documents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT,
-      path TEXT
+      path TEXT UNIQUE,
+      size INTEGER,
+      lastModified TEXT
     )
   `).run();
 }
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 900,
+    height: 650,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -41,6 +43,36 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+// --- Utility: Get file metadata ---
+function getFileMetadata(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    return {
+      size: stats.size,
+      lastModified: stats.mtime.toISOString(),
+    };
+  } catch {
+    return { size: null, lastModified: null };
+  }
+}
+
+// --- Utility: Recursively get files from a directory ---
+function getAllFiles(dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  let files = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files = files.concat(getAllFiles(fullPath));
+    } else {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
 // ✅ Get all documents
 ipcMain.handle('get-documents', () => {
   return db.prepare('SELECT * FROM documents').all();
@@ -49,8 +81,6 @@ ipcMain.handle('get-documents', () => {
 // ✅ Delete document
 ipcMain.handle('delete-document', (event, docId) => {
   db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
-
-  // Send updated list to frontend
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
   mainWindow.webContents.send('documents-updated', updatedDocs);
   return true;
@@ -64,33 +94,30 @@ ipcMain.handle('pick-and-add-document', async () => {
   const filePath = filePaths[0];
   const fileName = path.basename(filePath);
 
-  // Avoid duplicates
   const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(filePath);
-  if (exists) {
-    return { duplicate: true, name: fileName, path: filePath };
-  }
+  if (exists) return { duplicate: true, name: fileName, path: filePath };
 
-  db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)').run(fileName, filePath);
+  const meta = getFileMetadata(filePath);
+  db.prepare('INSERT INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)')
+    .run(fileName, filePath, meta.size, meta.lastModified);
+
   const newDoc = db.prepare('SELECT * FROM documents ORDER BY id DESC LIMIT 1').get();
   mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
   return newDoc;
 });
 
-// ✅ Pick a directory and add all files
+// ✅ Pick a directory and add all files (recursive)
 ipcMain.handle('pick-directory', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return;
 
   const dirPath = result.filePaths[0];
-  const files = fs.readdirSync(dirPath).map(file => ({
-    name: file,
-    path: path.join(dirPath, file),
-  }));
+  const filePaths = getAllFiles(dirPath);
 
-  const insert = db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)');
-  for (const file of files) {
-    const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(file.path);
-    if (!exists) insert.run(file.name, file.path);
+  const insert = db.prepare('INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)');
+  for (const filePath of filePaths) {
+    const meta = getFileMetadata(filePath);
+    insert.run(path.basename(filePath), filePath, meta.size, meta.lastModified);
   }
 
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
@@ -98,7 +125,13 @@ ipcMain.handle('pick-directory', async () => {
   return updatedDocs;
 });
 
-// ✅ Show a file in Finder/Explorer
+// ✅ Show file in Finder/Explorer
 ipcMain.handle('show-in-finder', async (_, filePath) => {
   shell.showItemInFolder(filePath);
+});
+
+// ✅ Open file in default app
+ipcMain.handle('open-file', async (_, filePath) => {
+  const result = await shell.openPath(filePath);
+  return result || true;
 });
