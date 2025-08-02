@@ -41,26 +41,34 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+// ✅ Get all documents
 ipcMain.handle('get-documents', () => {
   return db.prepare('SELECT * FROM documents').all();
 });
 
-ipcMain.handle('add-document', (_, doc) => {
-  db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)').run(doc.name, doc.path);
+// ✅ Delete document
+ipcMain.handle('delete-document', (event, docId) => {
+  db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+
+  // Send updated list to frontend
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
   mainWindow.webContents.send('documents-updated', updatedDocs);
   return true;
 });
 
-// ✅ Pick a real file
+// ✅ Pick and add single document
 ipcMain.handle('pick-and-add-document', async () => {
-  const { canceled, filePaths } = await dialog.showOpenDialog({
-    properties: ['openFile'],
-  });
+  const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openFile'] });
   if (canceled || filePaths.length === 0) return null;
 
   const filePath = filePaths[0];
   const fileName = path.basename(filePath);
+
+  // Avoid duplicates
+  const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(filePath);
+  if (exists) {
+    return { duplicate: true, name: fileName, path: filePath };
+  }
 
   db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)').run(fileName, filePath);
   const newDoc = db.prepare('SELECT * FROM documents ORDER BY id DESC LIMIT 1').get();
@@ -68,8 +76,7 @@ ipcMain.handle('pick-and-add-document', async () => {
   return newDoc;
 });
 
-
-// ✅ Pick a directory and add all files to DB
+// ✅ Pick a directory and add all files
 ipcMain.handle('pick-directory', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return;
@@ -80,15 +87,15 @@ ipcMain.handle('pick-directory', async () => {
     path: path.join(dirPath, file),
   }));
 
-  // Insert files into DB using better-sqlite3
   const insert = db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)');
-  const docs = [];
   for (const file of files) {
-    insert.run(file.name, file.path);
-    docs.push({ name: file.name, path: file.path });
+    const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(file.path);
+    if (!exists) insert.run(file.name, file.path);
   }
 
-  return docs;
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return updatedDocs;
 });
 
 // ✅ Show a file in Finder/Explorer

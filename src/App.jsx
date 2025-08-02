@@ -10,16 +10,26 @@ function App() {
 
   const addDocumentFromFile = async () => {
     const newDoc = await window.electron.invoke('pick-and-add-document');
-    if (newDoc) fetchDocuments();
+    if (!newDoc) return;
+
+    if (newDoc.duplicate) {
+      alert(`⚠ ${newDoc.name} is already in the database.`);
+    } else {
+      fetchDocuments();
+    }
   };
 
   const pickDirectory = async () => {
-    const updatedDocs = await window.electron.invoke('pick-directory');
-    if (updatedDocs) setDocuments(updatedDocs);
+    await window.electron.invoke('pick-directory');
+    // Auto-update handled by 'documents-updated' event
   };
 
   const showInFinder = async (filePath) => {
     await window.electron.invoke('show-in-finder', filePath);
+  };
+
+  const deleteDocument = async (id) => {
+    await window.electron.invoke('delete-document', id);
   };
 
   useEffect(() => {
@@ -54,6 +64,12 @@ function App() {
                 style={{ marginLeft: 10 }}
               >
                 🔍 Show in Finder
+              </button>
+              <button 
+                onClick={() => deleteDocument(doc.id)} 
+                style={{ marginLeft: 10 }}
+              >
+                🗑 Delete
               </button>
             </li>
           ))}

@@ -1,0 +1,280 @@
+
+# ./vite.config.js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  root: './src',
+  base: './',
+  build: {
+    outDir: '../dist',
+  },
+});
+
+# ./files.sh
+echo "" > all_files.txt
+find . \
+  -type f \
+  ! -path "*/node_modules/*" \
+  ! -path "*/.git/*" \
+  ! -path "*/package-lock.json" \
+  ! -path "*/database.sqlite" \
+  ! -path "*/all_files.txt" \
+  | while read file; do
+      echo "# ${file#/path/to/root/}"
+      echo "# ${file#/path/to/root/}" >> all_files.txt
+      cat "$file" >> all_files.txt
+      echo "" >> all_files.txt
+    done
+# ./.gitignore
+node_modules
+
+# ./package.json
+{
+  "name": "document-organizer",
+  "version": "0.0.1",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev:react": "vite",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
+    "postinstall": "electron-rebuild"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "electron": "^29.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.0",
+    "concurrently": "^8.0.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.0.0"
+  }
+}
+
+# ./electron/preload.js
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electron', {
+  invoke: (channel, data) => ipcRenderer.invoke(channel, data),
+  on: (channel, func) => ipcRenderer.on(channel, (event, ...args) => func(...args))
+});
+
+# ./electron/db.js
+import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const dbPath = path.join(__dirname, '..', 'database.sqlite');
+const db = new Database(dbPath);
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    path TEXT
+  )
+`).run();
+
+export function getAllDocuments() {
+  return db.prepare('SELECT * FROM documents').all();
+}
+
+# ./electron/main.js
+// electron/main.js
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import Database from 'better-sqlite3';
+import fs from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let db;
+let mainWindow;
+
+function initDB() {
+  db = new Database(path.join(__dirname, '../database.sqlite'));
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      path TEXT
+    )
+  `).run();
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 800,
+    height: 600,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  mainWindow.loadURL('http://localhost:5173');
+}
+
+app.whenReady().then(() => {
+  initDB();
+  createWindow();
+});
+
+ipcMain.handle('get-documents', () => {
+  return db.prepare('SELECT * FROM documents').all();
+});
+
+ipcMain.handle('add-document', (_, doc) => {
+  db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)').run(doc.name, doc.path);
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return true;
+});
+
+// ✅ Pick a real file
+ipcMain.handle('pick-and-add-document', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return null;
+
+  const filePath = filePaths[0];
+  const fileName = path.basename(filePath);
+
+  db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)').run(fileName, filePath);
+  const newDoc = db.prepare('SELECT * FROM documents ORDER BY id DESC LIMIT 1').get();
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return newDoc;
+});
+
+
+// ✅ Pick a directory and add all files to DB
+ipcMain.handle('pick-directory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return;
+
+  const dirPath = result.filePaths[0];
+  const files = fs.readdirSync(dirPath).map(file => ({
+    name: file,
+    path: path.join(dirPath, file),
+  }));
+
+  // Insert files into DB using better-sqlite3
+  const insert = db.prepare('INSERT INTO documents (name, path) VALUES (?, ?)');
+  const docs = [];
+  for (const file of files) {
+    insert.run(file.name, file.path);
+    docs.push({ name: file.name, path: file.path });
+  }
+
+  return docs;
+});
+
+// ✅ Show a file in Finder/Explorer
+ipcMain.handle('show-in-finder', async (_, filePath) => {
+  shell.showItemInFolder(filePath);
+});
+# ./src/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Document Organizer</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/main.jsx"></script>
+</body>
+</html>
+
+# ./src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+# ./src/App.jsx
+import { useState, useEffect } from 'react';
+
+function App() {
+  const [documents, setDocuments] = useState([]);
+
+  const fetchDocuments = async () => {
+    const docs = await window.electron.invoke('get-documents');
+    setDocuments(docs || []);
+  };
+
+  const addDocumentFromFile = async () => {
+    const newDoc = await window.electron.invoke('pick-and-add-document');
+    if (newDoc) fetchDocuments();
+  };
+
+  const pickDirectory = async () => {
+    const updatedDocs = await window.electron.invoke('pick-directory');
+    if (updatedDocs) setDocuments(updatedDocs);
+  };
+
+  const showInFinder = async (filePath) => {
+    await window.electron.invoke('show-in-finder', filePath);
+  };
+
+  useEffect(() => {
+    fetchDocuments();
+    window.electron.on('documents-updated', (updatedDocs) => {
+      setDocuments(updatedDocs || []);
+    });
+  }, []);
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h1>📂 Document Organizer</h1>
+
+      <button onClick={addDocumentFromFile} style={{ marginRight: 10 }}>
+        📄 Add Document From File
+      </button>
+
+      <button onClick={pickDirectory}>
+        📁 Add All Files from Directory
+      </button>
+
+      <h2>Stored Documents:</h2>
+      {documents.length === 0 ? (
+        <p>No documents yet.</p>
+      ) : (
+        <ul>
+          {documents.map((doc) => (
+            <li key={doc.id}>
+              <strong>{doc.name}</strong> — <span>{doc.path}</span>
+              <button 
+                onClick={() => showInFinder(doc.path)} 
+                style={{ marginLeft: 10 }}
+              >
+                🔍 Show in Finder
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export default App;
+
