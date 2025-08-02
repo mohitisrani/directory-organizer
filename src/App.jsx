@@ -31,6 +31,11 @@ function App() {
     window.electron.invoke('delete-document', id);
   };
 
+  const checkMissingFiles = async () => {
+    const removedCount = await window.electron.invoke('check-missing-files');
+    alert(`Removed ${removedCount} missing files from database.`);
+  };
+
   useEffect(() => {
     fetchDocuments();
     window.electron.on('documents-updated', (updatedDocs) => {
@@ -51,6 +56,14 @@ function App() {
     return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const fileExists = (doc) => {
+    try {
+      return window.electron.fsExistsSync?.(doc.path); // Optional preload function
+    } catch {
+      return true; // assume exists if not checking locally
+    }
+  };
+
   return (
     <div style={{ padding: 20 }}>
       <h1>📂 Document Organizer</h1>
@@ -59,9 +72,10 @@ function App() {
         <button onClick={addDocumentFromFile} style={{ marginRight: 10 }}>
           📄 Add File
         </button>
-        <button onClick={pickDirectory}>
+        <button onClick={pickDirectory} style={{ marginRight: 10 }}>
           📁 Add Directory (Recursive)
         </button>
+        <button onClick={checkMissingFiles}>🧹 Remove Missing Files</button>
       </div>
 
       <input
@@ -88,7 +102,7 @@ function App() {
           </thead>
           <tbody>
             {filteredDocs.map((doc) => (
-              <tr key={doc.id}>
+              <tr key={doc.id} style={{ color: doc.missing ? 'red' : 'black' }}>
                 <td>{doc.name}</td>
                 <td>{doc.path}</td>
                 <td>{formatSize(doc.size)}</td>
