@@ -105,10 +105,36 @@ ipcMain.handle('pick-directory', async () => {
   return updatedDocs;
 });
 
+// Drag & drop handler
+ipcMain.handle('add-dropped-files', (event, filePaths) => {
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)'
+  );
+
+  function processPath(p) {
+    const stats = fs.statSync(p);
+    if (stats.isDirectory()) {
+      const entries = fs.readdirSync(p);
+      for (const entry of entries) {
+        processPath(path.join(p, entry));
+      }
+    } else {
+      const meta = getFileMetadata(p);
+      insert.run(path.basename(p), p, meta.size, meta.lastModified);
+    }
+  }
+
+  filePaths.forEach(processPath);
+
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return updatedDocs;
+});
+
+
 ipcMain.handle('show-in-finder', (_, filePath) => shell.showItemInFolder(filePath));
 ipcMain.handle('open-file', async (_, filePath) => shell.openPath(filePath));
 
-// ✅ Missing files check
 ipcMain.handle('check-missing-files', () => {
   const docs = db.prepare('SELECT * FROM documents').all();
   const missing = [];
@@ -127,4 +153,42 @@ ipcMain.handle('check-missing-files', () => {
   mainWindow.webContents.send('documents-updated', updatedDocs);
 
   return missing.length;
+});
+
+// Update tags/category
+ipcMain.handle('update-doc-metadata', (event, { id, category, tags }) => {
+  db.prepare('UPDATE documents SET category=?, tags=? WHERE id=?').run(category, tags, id);
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return true;
+});
+
+// Export DB
+ipcMain.handle('export-db', async () => {
+  const { filePath } = await dialog.showSaveDialog({
+    title: 'Export Database',
+    defaultPath: 'documents-backup.sqlite',
+    filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }]
+  });
+
+  if (!filePath) return false;
+  fs.copyFileSync(path.join(__dirname, '..', 'database.sqlite'), filePath);
+  return true;
+});
+
+// Import DB
+ipcMain.handle('import-db', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }]
+  });
+
+  if (canceled || filePaths.length === 0) return false;
+
+  const importPath = filePaths[0];
+  fs.copyFileSync(importPath, path.join(__dirname, '..', 'database.sqlite'));
+
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return true;
 });
