@@ -2,6 +2,8 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import pdf from 'pdf-parse';
+import { pipeline } from '@xenova/transformers';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,9 +20,13 @@ db.prepare(`
     size INTEGER,
     lastModified TEXT,
     category TEXT DEFAULT '',
-    tags TEXT DEFAULT ''
+    tags TEXT DEFAULT '',
+    embedding TEXT DEFAULT NULL  -- store JSON array of embedding
   )
 `).run();
+
+try { db.prepare('ALTER TABLE documents ADD COLUMN embedding TEXT DEFAULT NULL').run(); } catch {}
+
 
 // Migration in case old DB exists
 try {

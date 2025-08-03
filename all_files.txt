@@ -1,12 +1,30 @@
 
+# ./tailwind.config.js
+export default {
+    content: [
+      "./index.html",
+      "./src/**/*.{js,jsx,ts,tsx}",
+    ],
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+        },
+      },
+    },
+    plugins: [],
+  };
+  
 # ./vite.config.js
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
+// Electron typically serves from src as root
 export default defineConfig({
-  plugins: [react()],
   root: './src',
   base: './',
+  plugins: [react(), tailwindcss()],
   build: {
     outDir: '../dist',
   },
@@ -56,6 +74,9 @@ node_modules
     "react-dom": "^18.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.1.11",
+    "@tailwindcss/postcss": "^4.1.11",
+    "@tailwindcss/vite": "^4.1.11",
     "@vitejs/plugin-react": "^4.0.0",
     "autoprefixer": "^10.4.21",
     "concurrently": "^8.0.0",
@@ -72,9 +93,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electron', {
   invoke: (channel, data) => ipcRenderer.invoke(channel, data),
-  on: (channel, func) => ipcRenderer.on(channel, (event, ...args) => func(...args))
+  on: (channel, func) => ipcRenderer.on(channel, (event, ...args) => func(...args)),
+  removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
 });
-
 # ./electron/db.js
 // electron/db.js
 import Database from 'better-sqlite3';
@@ -324,6 +345,19 @@ ipcMain.handle('import-db', async () => {
   return true;
 });
 
+
+ipcMain.handle('file-exists', (_, filePath) => {
+  const fs = require('fs');
+  return fs.existsSync(filePath);
+});
+# ./postcss.config.js
+export default {
+    plugins: {
+      '@tailwindcss/postcss': {},
+      autoprefixer: {},
+    },
+  };
+  
 # ./src/index.html
 <!DOCTYPE html>
 <html lang="en">
@@ -339,6 +373,8 @@ ipcMain.handle('import-db', async () => {
 </html>
 
 # ./src/index.css
+@import "tailwindcss";
+
 html, body, #root {
 height: 100%;
 margin: 0;
@@ -393,37 +429,48 @@ min-width: 30px;
 margin-right: 2px;
 }
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 
 # ./src/components/DocumentsTable.jsx
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon } from '@heroicons/react/24/solid';
 
-const CATEGORY_OPTIONS = [
-  'Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'
-];
+const CATEGORY_OPTIONS = ['Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'];
 
 export default function DocumentsTable() {
   const [documents, setDocuments] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
 
+  const refreshDocuments = async () => {
+    const docs = await window.electron.invoke('get-documents');
+    // Mark missing files
+    const checked = await Promise.all(
+      docs.map(async (doc) => {
+        const exists = await window.electron.invoke('file-exists', doc.path);
+        return { ...doc, missing: !exists };
+      })
+    );
+    setDocuments(checked);
+  };
+
   useEffect(() => {
-    window.electron.ipcRenderer.invoke('get-documents').then(setDocuments);
-
-    window.electron.ipcRenderer.on('documents-updated', (_, updatedDocs) => {
-      setDocuments(updatedDocs);
-    });
-
-    return () => {
-      window.electron.ipcRenderer.removeAllListeners('documents-updated');
-    };
+    refreshDocuments();
+    const listener = () => refreshDocuments();
+    window.electron.on('documents-updated', listener);
+    return () => {};
   }, []);
 
   const updateDocument = (id, data) => {
-    window.electron.ipcRenderer.invoke('update-document', { id, ...data });
+    window.electron.invoke('update-document', { id, ...data });
   };
+
+  const deleteDocument = (id) => {
+    if (confirm('Are you sure you want to delete this document from the database?')) {
+      window.electron.invoke('delete-document', id);
+    }
+  };
+
+  const viewFile = (filePath) => window.electron.invoke('open-file', filePath);
+  const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
 
   const handleTagAdd = (doc, e) => {
     if (e.key === 'Enter' && e.target.value.trim() !== '') {
@@ -447,64 +494,68 @@ export default function DocumentsTable() {
   const filteredDocs = documents.filter(doc => {
     const query = searchQuery.toLowerCase();
     return (
-      doc.file_name.toLowerCase().includes(query) ||
-      doc.category.toLowerCase().includes(query) ||
-      (doc.tags && doc.tags.toLowerCase().includes(query))
+      (doc.name || '').toLowerCase().includes(query) ||
+      (doc.path || '').toLowerCase().includes(query) ||
+      (doc.category || '').toLowerCase().includes(query) ||
+      (doc.tags || '').toLowerCase().includes(query)
     );
   });
 
   return (
-    <div className="p-6">
-      <h2 className="text-2xl font-bold mb-4">Document Organizer</h2>
+    <div className="space-y-4">
+      <h2 className="text-2xl font-semibold text-gray-800 mb-2">Your Documents</h2>
 
       <input
         type="text"
-        placeholder="Search by name, category, or tags..."
+        placeholder="Search by name, path, category, or tags..."
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
-        className="w-full p-2 border rounded mb-4"
+        className="w-full p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
       />
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full border border-gray-300">
-          <thead className="bg-gray-100">
+      <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
+        <table className="min-w-full border-collapse overflow-hidden rounded-2xl">
+          <thead className="bg-gray-50 text-gray-700 text-sm">
             <tr>
-              <th className="p-2 border">File Name</th>
-              <th className="p-2 border">Path</th>
-              <th className="p-2 border">Category</th>
-              <th className="p-2 border">Tags</th>
-              <th className="p-2 border">Missing?</th>
+              <th className="p-3 text-left">File Name</th>
+              <th className="p-3 text-left">Path</th>
+              <th className="p-3 text-left">Category</th>
+              <th className="p-3 text-left">Tags</th>
+              <th className="p-3 text-center">Missing?</th>
+              <th className="p-3 text-center">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {filteredDocs.map(doc => (
+            {filteredDocs.map((doc, idx) => (
               <tr
                 key={doc.id}
-                className={`border-b ${doc.missing ? 'bg-red-100' : 'bg-white'}`}
+                className={`border-t border-gray-100 hover:bg-gray-50 transition ${
+                  idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                } ${doc.missing ? 'bg-red-50' : ''}`}
               >
-                <td className="p-2 border">{doc.file_name}</td>
-                <td className="p-2 border text-xs">{doc.file_path}</td>
-                <td className="p-2 border">
+                <td className="p-3 font-medium text-gray-800">{doc.name}</td>
+                <td className="p-3 text-xs text-gray-500">{doc.path}</td>
+                <td className="p-3">
                   <select
                     defaultValue={doc.category || 'Other'}
                     onChange={(e) => updateDocument(doc.id, { category: e.target.value })}
-                    className="w-full border rounded p-1"
+                    className="w-full border rounded-full p-1 px-2 text-sm shadow-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
                   >
                     {CATEGORY_OPTIONS.map(cat => (
                       <option key={cat} value={cat}>{cat}</option>
                     ))}
                   </select>
                 </td>
-                <td className="p-2 border">
+                <td className="p-3">
                   <div className="flex flex-wrap gap-1 mb-1">
                     {doc.tags && doc.tags.split(',').map(tag => (
                       <span
                         key={tag}
-                        className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-xs"
+                        className="flex items-center bg-gradient-to-r from-blue-100 to-blue-200 text-blue-800 px-2 py-1 rounded-full text-xs shadow-sm hover:shadow transition"
                       >
                         {tag}
                         <XMarkIcon
-                          className="w-4 h-4 ml-1 cursor-pointer"
+                          className="w-4 h-4 ml-1 cursor-pointer hover:text-red-500 transition-transform hover:scale-110"
                           onClick={() => handleTagRemove(doc, tag)}
                         />
                       </span>
@@ -514,10 +565,17 @@ export default function DocumentsTable() {
                     type="text"
                     placeholder="Add tag..."
                     onKeyDown={(e) => handleTagAdd(doc, e)}
-                    className="w-full border rounded p-1 text-xs"
+                    className="w-full border rounded-full p-1 px-2 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
                 </td>
-                <td className="p-2 border text-center">{doc.missing ? 'Yes' : 'No'}</td>
+                <td className="p-3 text-center font-semibold">
+                  {doc.missing ? '⚠️ Missing' : 'No'}
+                </td>
+                <td className="p-3 text-center space-x-2">
+                  <button onClick={() => viewFile(doc.path)} className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">View</button>
+                  <button onClick={() => showInFinder(doc.path)} className="px-2 py-1 text-xs bg-gray-500 text-white rounded hover:bg-gray-600">Finder</button>
+                  <button onClick={() => deleteDocument(doc.id)} className="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600">Delete</button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -531,6 +589,8 @@ export default function DocumentsTable() {
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import './index.css';
+
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -539,16 +599,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 );
 
 # ./src/App.jsx
-import { useState, useEffect } from 'react';
+import { useEffect } from 'react';
+import DocumentsTable from './components/DocumentsTable.jsx';
 
 function App() {
-  const [documents, setDocuments] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-
-  const fetchDocuments = async () => {
-    const docs = await window.electron.invoke('get-documents');
-    setDocuments(docs || []);
-  };
 
   const addDocumentFromFile = async () => {
     const newDoc = await window.electron.invoke('pick-and-add-document');
@@ -560,10 +614,6 @@ function App() {
     await window.electron.invoke('pick-directory');
   };
 
-  const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
-  const openFile = (filePath) => window.electron.invoke('open-file', filePath);
-  const deleteDocument = (id) => window.electron.invoke('delete-document', id);
-
   const checkMissingFiles = async () => {
     const removedCount = await window.electron.invoke('check-missing-files');
     alert(`Removed ${removedCount} missing files from database.`);
@@ -572,33 +622,6 @@ function App() {
   const exportDB = () => window.electron.invoke('export-db');
   const importDB = () => window.electron.invoke('import-db');
 
-  const updateMetadata = (id, category, tags) => {
-    window.electron.invoke('update-doc-metadata', { id, category, tags });
-  };
-
-  useEffect(() => {
-    fetchDocuments();
-    window.electron.on('documents-updated', (updatedDocs) => {
-      setDocuments(updatedDocs || []);
-    });
-  }, []);
-
-  const filteredDocs = documents.filter(
-    (doc) =>
-      doc.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      doc.path.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (doc.tags || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (doc.category || '').toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const formatSize = (size) => {
-    if (!size) return '-';
-    if (size < 1024) return `${size} B`;
-    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  // Drag & drop
   const handleDrop = async (e) => {
     e.preventDefault();
     const files = [...e.dataTransfer.files].map(f => f.path);
@@ -607,89 +630,44 @@ function App() {
 
   return (
     <div
-      style={{ padding: 20 }}
+      className="min-h-screen bg-gray-100 flex justify-center p-6 font-sans"
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
     >
-      <h1>📂 Document Organizer</h1>
+      <div className="w-full max-w-7xl space-y-6">
 
-      <div style={{ marginBottom: 10 }}>
-        <button onClick={addDocumentFromFile} style={{ marginRight: 10 }}>
-          📄 Add File
-        </button>
-        <button onClick={pickDirectory} style={{ marginRight: 10 }}>
-          📁 Add Directory (Recursive)
-        </button>
-        <button onClick={checkMissingFiles} style={{ marginRight: 10 }}>
-          🧹 Remove Missing Files
-        </button>
-        <button onClick={exportDB} style={{ marginRight: 10 }}>
-          💾 Export DB
-        </button>
-        <button onClick={importDB}>
-          📥 Import DB
-        </button>
+        {/* Header */}
+        <div className="bg-white shadow-md rounded-2xl p-8 flex flex-col items-center">
+          <h1 className="text-4xl font-semibold text-gray-800 mb-1 flex items-center gap-2">
+            📂 Document Organizer
+          </h1>
+          <p className="text-gray-500 text-sm">Organize, tag, and manage your files effortlessly</p>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="bg-white shadow rounded-xl p-4 flex flex-wrap justify-center gap-3">
+          <button onClick={addDocumentFromFile} className="px-4 py-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition">
+            📄 Add File
+          </button>
+          <button onClick={pickDirectory} className="px-4 py-2 bg-green-500 text-white rounded-full shadow hover:bg-green-600 transition">
+            📁 Add Directory
+          </button>
+          <button onClick={checkMissingFiles} className="px-4 py-2 bg-yellow-400 text-white rounded-full shadow hover:bg-yellow-500 transition">
+            🧹 Remove Missing Files
+          </button>
+          <button onClick={exportDB} className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition">
+            💾 Export DB
+          </button>
+          <button onClick={importDB} className="px-4 py-2 bg-purple-500 text-white rounded-full shadow hover:bg-purple-600 transition">
+            📥 Import DB
+          </button>
+        </div>
+
+        {/* Table */}
+        <div className="bg-white shadow-lg rounded-2xl p-6">
+          <DocumentsTable />
+        </div>
       </div>
-
-      <input
-        type="text"
-        placeholder="🔍 Search by name, path, tags, category..."
-        value={searchTerm}
-        onChange={(e) => setSearchTerm(e.target.value)}
-        style={{ marginBottom: 20, padding: 5, width: 400 }}
-      />
-
-      <h2>Stored Documents ({filteredDocs.length}):</h2>
-      {filteredDocs.length === 0 ? (
-        <p>No matching documents.</p>
-      ) : (
-        <table border="1" cellPadding="5" style={{ borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Path</th>
-              <th>Size</th>
-              <th>Last Modified</th>
-              <th>Category</th>
-              <th>Tags</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredDocs.map((doc) => (
-              <tr key={doc.id}>
-                <td>{doc.name}</td>
-                <td>{doc.path}</td>
-                <td>{formatSize(doc.size)}</td>
-                <td>{doc.lastModified || '-'}</td>
-                <td>
-                  <input
-                    value={doc.category || ''}
-                    onChange={(e) =>
-                      updateMetadata(doc.id, e.target.value, doc.tags || '')
-                    }
-                    style={{ width: 80 }}
-                  />
-                </td>
-                <td>
-                  <input
-                    value={doc.tags || ''}
-                    onChange={(e) =>
-                      updateMetadata(doc.id, doc.category || '', e.target.value)
-                    }
-                    style={{ width: 120 }}
-                  />
-                </td>
-                <td>
-                  <button onClick={() => showInFinder(doc.path)}>🔍</button>
-                  <button onClick={() => openFile(doc.path)} style={{ marginLeft: 5 }}>▶</button>
-                  <button onClick={() => deleteDocument(doc.id)} style={{ marginLeft: 5 }}>🗑</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </div>
   );
 }

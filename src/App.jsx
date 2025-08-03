@@ -6,11 +6,23 @@ function App() {
   const addDocumentFromFile = async () => {
     const newDoc = await window.electron.invoke('pick-and-add-document');
     if (!newDoc) return;
-    if (newDoc.duplicate) alert(`⚠ ${newDoc.name} is already in the database.`);
+    if (newDoc.duplicate) {
+      alert(`⚠ ${newDoc.name} is already in the database.`);
+      return;
+    }
+  
+    // ✅ Generate embedding for the new doc
+    await window.electron.invoke('generate-document-embedding', newDoc.id);
   };
 
   const pickDirectory = async () => {
-    await window.electron.invoke('pick-directory');
+    const addedDocs = await window.electron.invoke('pick-directory');
+    if (!addedDocs) return;
+  
+    // ✅ Generate embeddings for each new doc
+    for (const doc of addedDocs) {
+      await window.electron.invoke('generate-document-embedding', doc.id);
+    }
   };
 
   const checkMissingFiles = async () => {

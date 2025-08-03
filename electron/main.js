@@ -3,6 +3,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import db from './db.js';
+import { pipeline } from '@xenova/transformers';
+import pdf from 'pdf-parse'; // ✅ Needed for extractText()
+
+import { PDFDocument } from 'pdf-lib';
+import Tesseract from 'tesseract.js';
+
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -206,4 +213,161 @@ ipcMain.handle('import-db', async () => {
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
   mainWindow.webContents.send('documents-updated', updatedDocs);
   return true;
+});
+
+
+ipcMain.handle('file-exists', (_, filePath) => {
+  return fs.existsSync(filePath);
+});
+
+ipcMain.handle('read-file-content', async (_, filePath) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+
+    // --- TEXT ---
+    if (['.txt', '.md', '.json', '.log', '.csv'].includes(ext)) {
+      const data = fs.readFileSync(filePath, 'utf-8');
+      return { type: 'text', content: data.slice(0, 5000) };
+    }
+
+    // --- IMAGE as Base64 ---
+    if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
+      const data = fs.readFileSync(filePath);
+      const base64 = `data:image/${ext.replace('.', '')};base64,${data.toString('base64')}`;
+      return { type: 'image', content: base64 };
+    }
+
+    // --- PDF as Base64 ---
+    if (ext === '.pdf') {
+      const data = fs.readFileSync(filePath);
+      const base64 = `data:application/pdf;base64,${data.toString('base64')}`;
+      return { type: 'pdf', content: base64 };
+    }
+
+    return { type: 'unsupported', content: null };
+  } catch (err) {
+    console.error('Error reading file for preview:', err);
+    return { type: 'error', content: null };
+  }
+});
+
+let embedder = null;
+async function getEmbedder() {
+  if (!embedder) {
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return embedder;
+}
+
+
+// -------------------- TEXT EXTRACTION & EMBEDDINGS --------------------
+
+async function extractText(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      console.warn('⚠️ File not found, skipping embedding:', filePath);
+      return '';
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+
+    // 1. Text-based files
+    if (['.txt', '.md', '.csv', '.json', '.log'].includes(ext)) {
+      return fs.readFileSync(filePath, 'utf-8').slice(0, 20000);
+    }
+
+    // 2. PDF: Try pdf-parse first
+    if (ext === '.pdf') {
+      const absPath = path.resolve(filePath);
+      const dataBuffer = fs.readFileSync(absPath);
+      const pdfData = await pdf(dataBuffer);
+
+      let extractedText = (pdfData.text || '').trim();
+
+      // 3. Fallback to OCR if very little text
+      if (extractedText.length < 50) {
+        console.log('⚡ Running OCR on PDF images:', filePath);
+        const tempDir = path.join(__dirname, 'ocr-temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+        // Convert PDF to PNG images using poppler
+        execSync(`pdftoppm "${absPath}" "${tempDir}/page" -png`);
+
+        // Process each page
+        const pngFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.png'));
+        for (const pngFile of pngFiles) {
+          console.log('🖼 OCR processing:', pngFile);
+          const imgPath = path.join(tempDir, pngFile);
+          const { data: { text } } = await Tesseract.recognize(imgPath, 'eng');
+          extractedText += '\n' + text;
+          fs.unlinkSync(imgPath); // cleanup page image
+        }
+      }
+
+      return extractedText.slice(0, 20000);
+    }
+
+    return '';
+  } catch (err) {
+    console.error('❌ OCR/Text extraction failed for', filePath, err);
+    return '';
+  }
+}
+
+// Generate embedding
+async function generateEmbedding(text) {
+  if (!text || !text.trim()) return null;
+  const model = await getEmbedder();
+  const output = await model(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data); // Float32Array → JS Array
+}
+
+// Generate embedding for one document
+ipcMain.handle('generate-document-embedding', async (_, docId) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
+  if (!doc) return null;
+
+  // Extract text safely
+  const text = await extractText(doc.path);
+  if (!text.trim()) {
+    console.warn('⚠️ No text extracted for embedding:', doc.path);
+    return null;
+  }
+
+  // Generate & store embedding
+  const embedding = await generateEmbedding(text);
+  if (!embedding) return null;
+
+  db.prepare('UPDATE documents SET embedding=? WHERE id=?')
+    .run(JSON.stringify(embedding), docId);
+
+  console.log('✅ Embedding generated for', doc.path);
+  return embedding;
+});
+
+
+// Cosine similarity
+function cosineSimilarity(vecA, vecB) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Semantic search IPC
+ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
+  const qEmbed = await generateEmbedding(query);
+  if (!qEmbed) return [];
+
+  const docs = db.prepare('SELECT * FROM documents WHERE embedding IS NOT NULL').all();
+  const scored = docs.map(doc => {
+    const embedding = JSON.parse(doc.embedding);
+    return { ...doc, score: cosineSimilarity(qEmbed, embedding) };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK);
 });
