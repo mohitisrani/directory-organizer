@@ -1,0 +1,81 @@
+
+
+MOHIT  ISRANI 
+ (352) 870-3094   •   mohit.israni@outlook.com •   misrani  •    mohitisrani 
+Sunnyvale, CA 
+ 
+ 
+  
+PROFESSIONAL SUMMARY 
+ 
+Accomplished Senior Machine Learning Engineer with over 5 years of experience in designing and implementing scalable ML pipelines 
+and optimizing model deployments. Proven track record in significantly reducing latency and enhancing system efficiency. Known for 
+technical leadership, innovative problem-solving using cutting-edge technologies. Passionate about fostering continuous learning and 
+driving impactful business outcome.
+TECHNICAL SKILLS 
+ 
+Programming Tools 
+Python ٠ Kubernetes ٠ Java ٠ Spring Boot ٠ Google Cloud ٠ MSSQL ٠ Docker ٠ Drools ٠ Elixir ٠ Azure ٠ 
+Spark ٠ Kafka ٠ Google Analytics
+Relevant Coursework 
+Algorithm Analysis, Data Science & Mining, Distributed Systems, High Performance Computing, 
+Database Management Systems, Statistical Methods in Research I and II, Computer Networks.
+ 
+WORK EXPERIENCE 
+ 
+Senior Machine Learning Engineer | Walmart Global Tech., Sunnyvale, CA  
+Technologies: Python, Docker, Kubernetes, GCP (Google Vertex AI, Dataproc Serverless, Big Query,  Compute 
+Engine), CI/CD (Looper, Concord), Kafka, Flask, MongoDB, Redis, Milvus 
+Jan 2022 – Present
+Role Highlights: 
+• Designed and implemented scalable ML pipelines, resulting in reduction in model deployment latency. 
+• Onboarded several ML projects to Dataproc Serverless, enhancing efficiency and scalability. 
+• Developed and automated CI/CD pipelines for deploying Docker images, models, endpoints, and instances. 
+• Created a central repository for managing Docker images, improving containerized model development and deployment. 
+• Built an integrated chatbot using Retrieval-Augmented Generation (RAG) to help store associates follow process guides. 
+• Provided technical leadership and mentorship, fostering continuous learning and innovation. 
+ 
+Software Engineer III | Walmart Global Tech., Bentonville, AR 
+Technologies: Java, Spring Boot, React, Azure, Kubernetes, Databricks, CI/CD, Terraform IAC 
+Oct 2018 – Jan 2022
+Role Highlights: 
+• Enhanced  CPLEX-based  optimization,  reducing  processing  time  from  90  minutes  to  8  minutes  by  orchestrating  it  on 
+Kubernetes with Redis Queue to enable distributed serverless architecture. 
+• Deployed a highly efficient code using Drools rules engine which found conflicts between several pre-defined rules in the 
+stateful Knowledge session. 
+• Designed and launched a feature store platform, accelerating data science projects by enabling users to transform raw 
+data into ready-to-use machine learning features. 
+• Developed several JAVA, Python backend services as part of Microservice Architecture. 
+• Set up CI/CD pipelines for microservices deployed on Azure Web Services, Azure Kubernetes, WCNP 
+• Used terraform to deploy several Azure cloud resources as a code. 
+ 
+Research Assistant | Python, MATLAB, VASP(DFT), VESTA Apr 2016 – Oct 2018 
+• Automated high-throughput DFT problems, significantly reducing analysis time using open-source Python libraries. 
+• Produced comprehensive data visualizations with Python, improving data interpretation and research efficiency. 
+ 
+EDUCATION
+ 
+Master of Science in Computers Science, GPA: 3.80 / 4 
+Master of Science in Materials Science, GPA: 3.80 / 4 
+University of Florida, Gainesville, Florida 
+May 2018 
+May 2018
+Bachelor of Technology in Metallurgical and Materials Engineering, GPA: 7.92 / 10 
+National Institute of Technology (VNIT), Nagpur, India 
+May 2015 
+ 
+ACHIEVEMENTS / LEADERSHIP 
+ 
+Making the Difference Award 
+• Awarded on making significant contribution to the success of Walmart. 
+Oct 2020
+Certificate of Achievement in ‘Dale Carnegie – Breakthrough to Success Corporate Course’ 
+• Met the required standards for completion of course. 
+Oct 2019
+Certificate in Scientific Computing (Awarded by University of Florida) 
+• Successfully Completed the prescribed course of study. 
+Aug 2017
+ 
+Part of Institute for Pure and Applied Mathematics (IPAM), UCLA Workshop 2017 
+Oct 2017
+• A week-long discussion on Optimal Control for Complex Energy Landscapes.   
