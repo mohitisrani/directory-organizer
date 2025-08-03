@@ -359,15 +359,33 @@ function cosineSimilarity(vecA, vecB) {
 
 // Semantic search IPC
 ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
+  console.log(`🔍 Semantic search started for query: "${query}"`);
+
   const qEmbed = await generateEmbedding(query);
-  if (!qEmbed) return [];
+  if (!qEmbed) {
+    console.warn('⚠️ No embedding generated for query');
+    return [];
+  }
 
   const docs = db.prepare('SELECT * FROM documents WHERE embedding IS NOT NULL').all();
+
   const scored = docs.map(doc => {
     const embedding = JSON.parse(doc.embedding);
-    return { ...doc, score: cosineSimilarity(qEmbed, embedding) };
+    const score = cosineSimilarity(qEmbed, embedding);
+    
+    // Log scores to console
+    console.log(`📄 [${doc.id}] ${doc.name} → score: ${score.toFixed(4)}`);
+    
+    return { ...doc, score };
   });
 
   scored.sort((a, b) => b.score - a.score);
+
+  console.log(`✅ Top ${topK} results for "${query}":`);
+  scored.slice(0, topK).forEach((doc, idx) =>
+    console.log(`   ${idx + 1}. ${doc.name} (score: ${doc.score.toFixed(4)})`)
+  );
+
   return scored.slice(0, topK);
 });
+
