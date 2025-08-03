@@ -13,7 +13,9 @@ export default defineConfig({
 });
 
 # ./files.sh
+
 echo "" > all_files.txt
+
 find . \
   -type f \
   ! -path "*/node_modules/*" \
@@ -22,12 +24,14 @@ find . \
   ! -path "*/database.sqlite" \
   ! -path "*/all_files.txt" \
   ! -path "*/next_steps.txt" \
+  ! -path "*/clipboard.txt" \
   | while read file; do
       echo "# ${file#/path/to/root/}"
       echo "# ${file#/path/to/root/}" >> all_files.txt
       cat "$file" >> all_files.txt
       echo "" >> all_files.txt
     done
+
 # ./.gitignore
 node_modules
 
@@ -44,6 +48,8 @@ node_modules
     "postinstall": "electron-rebuild"
   },
   "dependencies": {
+    "@headlessui/react": "^2.2.7",
+    "@heroicons/react": "^2.2.0",
     "better-sqlite3": "^9.6.0",
     "electron": "^29.0.0",
     "react": "^18.0.0",
@@ -51,8 +57,11 @@ node_modules
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.0",
+    "autoprefixer": "^10.4.21",
     "concurrently": "^8.0.0",
     "electron-rebuild": "^3.2.9",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.11",
     "vite": "^5.0.0",
     "wait-on": "^7.0.0"
   }
@@ -78,16 +87,26 @@ const __dirname = path.dirname(__filename);
 const dbPath = path.join(__dirname, '..', 'database.sqlite');
 const db = new Database(dbPath);
 
-// Create table + indexes
+// Create table with new columns for phase 3
 db.prepare(`
   CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     path TEXT UNIQUE,
     size INTEGER,
-    lastModified TEXT
+    lastModified TEXT,
+    category TEXT DEFAULT '',
+    tags TEXT DEFAULT ''
   )
 `).run();
+
+// Migration in case old DB exists
+try {
+  db.prepare('ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ""').run();
+} catch {}
+try {
+  db.prepare('ALTER TABLE documents ADD COLUMN tags TEXT DEFAULT ""').run();
+} catch {}
 
 db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)').run();
 db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_lastModified ON documents(lastModified)').run();
@@ -153,7 +172,22 @@ app.whenReady().then(() => {
 // IPC HANDLERS
 //
 
-ipcMain.handle('get-documents', () => db.prepare('SELECT * FROM documents').all());
+// Fetch all documents
+ipcMain.handle('get-documents', async () => {
+  return db.prepare('SELECT * FROM documents').all();
+});
+
+// Update category/tags
+ipcMain.handle('update-document', async (_, { id, category, tags }) => {
+  if (category !== undefined) {
+    db.prepare('UPDATE documents SET category = ? WHERE id = ?').run(category, id);
+  }
+  if (tags !== undefined) {
+    db.prepare('UPDATE documents SET tags = ? WHERE id = ?').run(tags, id);
+  }
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+});
 
 ipcMain.handle('delete-document', (event, docId) => {
   db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
@@ -202,10 +236,36 @@ ipcMain.handle('pick-directory', async () => {
   return updatedDocs;
 });
 
+// Drag & drop handler
+ipcMain.handle('add-dropped-files', (event, filePaths) => {
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)'
+  );
+
+  function processPath(p) {
+    const stats = fs.statSync(p);
+    if (stats.isDirectory()) {
+      const entries = fs.readdirSync(p);
+      for (const entry of entries) {
+        processPath(path.join(p, entry));
+      }
+    } else {
+      const meta = getFileMetadata(p);
+      insert.run(path.basename(p), p, meta.size, meta.lastModified);
+    }
+  }
+
+  filePaths.forEach(processPath);
+
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return updatedDocs;
+});
+
+
 ipcMain.handle('show-in-finder', (_, filePath) => shell.showItemInFolder(filePath));
 ipcMain.handle('open-file', async (_, filePath) => shell.openPath(filePath));
 
-// ✅ Missing files check
 ipcMain.handle('check-missing-files', () => {
   const docs = db.prepare('SELECT * FROM documents').all();
   const missing = [];
@@ -226,6 +286,44 @@ ipcMain.handle('check-missing-files', () => {
   return missing.length;
 });
 
+// Update tags/category
+ipcMain.handle('update-doc-metadata', (event, { id, category, tags }) => {
+  db.prepare('UPDATE documents SET category=?, tags=? WHERE id=?').run(category, tags, id);
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return true;
+});
+
+// Export DB
+ipcMain.handle('export-db', async () => {
+  const { filePath } = await dialog.showSaveDialog({
+    title: 'Export Database',
+    defaultPath: 'documents-backup.sqlite',
+    filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }]
+  });
+
+  if (!filePath) return false;
+  fs.copyFileSync(path.join(__dirname, '..', 'database.sqlite'), filePath);
+  return true;
+});
+
+// Import DB
+ipcMain.handle('import-db', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }]
+  });
+
+  if (canceled || filePaths.length === 0) return false;
+
+  const importPath = filePaths[0];
+  fs.copyFileSync(importPath, path.join(__dirname, '..', 'database.sqlite'));
+
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+  return true;
+});
+
 # ./src/index.html
 <!DOCTYPE html>
 <html lang="en">
@@ -239,6 +337,195 @@ ipcMain.handle('check-missing-files', () => {
   <script type="module" src="/main.jsx"></script>
 </body>
 </html>
+
+# ./src/index.css
+html, body, #root {
+height: 100%;
+margin: 0;
+font-family: 'Roboto', sans-serif;
+background-color: #f5f7fa;
+}
+
+h1 {
+margin-bottom: 20px;
+}
+
+button {
+cursor: pointer;
+}
+
+.MuiTable-root th {
+background-color: #f0f2f5;
+font-weight: bold;
+}
+
+.MuiTableRow-root:hover {
+background-color: #f9fafb;
+}
+
+.drag-over {
+border: 2px dashed #736efe;
+background-color: rgba(115, 110, 254, 0.05);
+
+pointer-events: none;
+}
+.drag-over * {
+pointer-events: auto;
+}
+
+.chip-container {
+display: flex;
+flex-wrap: wrap;
+gap: 4px;
+}
+
+.chip-container .MuiChip-root {
+margin: 2px;
+}
+
+.add-tag-input {
+width: 80px;
+margin-top: 2px;
+}
+
+.action-buttons button {
+min-width: 30px;
+margin-right: 2px;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+# ./src/components/DocumentsTable.jsx
+import React, { useState, useEffect } from 'react';
+import { XMarkIcon } from '@heroicons/react/24/solid';
+
+const CATEGORY_OPTIONS = [
+  'Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'
+];
+
+export default function DocumentsTable() {
+  const [documents, setDocuments] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    window.electron.ipcRenderer.invoke('get-documents').then(setDocuments);
+
+    window.electron.ipcRenderer.on('documents-updated', (_, updatedDocs) => {
+      setDocuments(updatedDocs);
+    });
+
+    return () => {
+      window.electron.ipcRenderer.removeAllListeners('documents-updated');
+    };
+  }, []);
+
+  const updateDocument = (id, data) => {
+    window.electron.ipcRenderer.invoke('update-document', { id, ...data });
+  };
+
+  const handleTagAdd = (doc, e) => {
+    if (e.key === 'Enter' && e.target.value.trim() !== '') {
+      const newTags = doc.tags ? doc.tags.split(',').map(t => t.trim()) : [];
+      newTags.push(e.target.value.trim());
+      const tagStr = newTags.join(', ');
+      updateDocument(doc.id, { tags: tagStr });
+      e.target.value = '';
+    }
+  };
+
+  const handleTagRemove = (doc, tag) => {
+    const newTags = doc.tags
+      .split(',')
+      .map(t => t.trim())
+      .filter(t => t !== tag)
+      .join(', ');
+    updateDocument(doc.id, { tags: newTags });
+  };
+
+  const filteredDocs = documents.filter(doc => {
+    const query = searchQuery.toLowerCase();
+    return (
+      doc.file_name.toLowerCase().includes(query) ||
+      doc.category.toLowerCase().includes(query) ||
+      (doc.tags && doc.tags.toLowerCase().includes(query))
+    );
+  });
+
+  return (
+    <div className="p-6">
+      <h2 className="text-2xl font-bold mb-4">Document Organizer</h2>
+
+      <input
+        type="text"
+        placeholder="Search by name, category, or tags..."
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        className="w-full p-2 border rounded mb-4"
+      />
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full border border-gray-300">
+          <thead className="bg-gray-100">
+            <tr>
+              <th className="p-2 border">File Name</th>
+              <th className="p-2 border">Path</th>
+              <th className="p-2 border">Category</th>
+              <th className="p-2 border">Tags</th>
+              <th className="p-2 border">Missing?</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredDocs.map(doc => (
+              <tr
+                key={doc.id}
+                className={`border-b ${doc.missing ? 'bg-red-100' : 'bg-white'}`}
+              >
+                <td className="p-2 border">{doc.file_name}</td>
+                <td className="p-2 border text-xs">{doc.file_path}</td>
+                <td className="p-2 border">
+                  <select
+                    defaultValue={doc.category || 'Other'}
+                    onChange={(e) => updateDocument(doc.id, { category: e.target.value })}
+                    className="w-full border rounded p-1"
+                  >
+                    {CATEGORY_OPTIONS.map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </td>
+                <td className="p-2 border">
+                  <div className="flex flex-wrap gap-1 mb-1">
+                    {doc.tags && doc.tags.split(',').map(tag => (
+                      <span
+                        key={tag}
+                        className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-xs"
+                      >
+                        {tag}
+                        <XMarkIcon
+                          className="w-4 h-4 ml-1 cursor-pointer"
+                          onClick={() => handleTagRemove(doc, tag)}
+                        />
+                      </span>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Add tag..."
+                    onKeyDown={(e) => handleTagAdd(doc, e)}
+                    className="w-full border rounded p-1 text-xs"
+                  />
+                </td>
+                <td className="p-2 border text-center">{doc.missing ? 'Yes' : 'No'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 # ./src/main.jsx
 import React from 'react';
@@ -273,21 +560,20 @@ function App() {
     await window.electron.invoke('pick-directory');
   };
 
-  const showInFinder = (filePath) => {
-    window.electron.invoke('show-in-finder', filePath);
-  };
-
-  const openFile = (filePath) => {
-    window.electron.invoke('open-file', filePath);
-  };
-
-  const deleteDocument = (id) => {
-    window.electron.invoke('delete-document', id);
-  };
+  const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
+  const openFile = (filePath) => window.electron.invoke('open-file', filePath);
+  const deleteDocument = (id) => window.electron.invoke('delete-document', id);
 
   const checkMissingFiles = async () => {
     const removedCount = await window.electron.invoke('check-missing-files');
     alert(`Removed ${removedCount} missing files from database.`);
+  };
+
+  const exportDB = () => window.electron.invoke('export-db');
+  const importDB = () => window.electron.invoke('import-db');
+
+  const updateMetadata = (id, category, tags) => {
+    window.electron.invoke('update-doc-metadata', { id, category, tags });
   };
 
   useEffect(() => {
@@ -300,7 +586,9 @@ function App() {
   const filteredDocs = documents.filter(
     (doc) =>
       doc.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      doc.path.toLowerCase().includes(searchTerm.toLowerCase())
+      doc.path.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (doc.tags || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (doc.category || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const formatSize = (size) => {
@@ -310,16 +598,19 @@ function App() {
     return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const fileExists = (doc) => {
-    try {
-      return window.electron.fsExistsSync?.(doc.path); // Optional preload function
-    } catch {
-      return true; // assume exists if not checking locally
-    }
+  // Drag & drop
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    const files = [...e.dataTransfer.files].map(f => f.path);
+    await window.electron.invoke('add-dropped-files', files);
   };
 
   return (
-    <div style={{ padding: 20 }}>
+    <div
+      style={{ padding: 20 }}
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
+    >
       <h1>📂 Document Organizer</h1>
 
       <div style={{ marginBottom: 10 }}>
@@ -329,15 +620,23 @@ function App() {
         <button onClick={pickDirectory} style={{ marginRight: 10 }}>
           📁 Add Directory (Recursive)
         </button>
-        <button onClick={checkMissingFiles}>🧹 Remove Missing Files</button>
+        <button onClick={checkMissingFiles} style={{ marginRight: 10 }}>
+          🧹 Remove Missing Files
+        </button>
+        <button onClick={exportDB} style={{ marginRight: 10 }}>
+          💾 Export DB
+        </button>
+        <button onClick={importDB}>
+          📥 Import DB
+        </button>
       </div>
 
       <input
         type="text"
-        placeholder="🔍 Search..."
+        placeholder="🔍 Search by name, path, tags, category..."
         value={searchTerm}
         onChange={(e) => setSearchTerm(e.target.value)}
-        style={{ marginBottom: 20, padding: 5, width: 300 }}
+        style={{ marginBottom: 20, padding: 5, width: 400 }}
       />
 
       <h2>Stored Documents ({filteredDocs.length}):</h2>
@@ -351,16 +650,36 @@ function App() {
               <th>Path</th>
               <th>Size</th>
               <th>Last Modified</th>
+              <th>Category</th>
+              <th>Tags</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filteredDocs.map((doc) => (
-              <tr key={doc.id} style={{ color: doc.missing ? 'red' : 'black' }}>
+              <tr key={doc.id}>
                 <td>{doc.name}</td>
                 <td>{doc.path}</td>
                 <td>{formatSize(doc.size)}</td>
                 <td>{doc.lastModified || '-'}</td>
+                <td>
+                  <input
+                    value={doc.category || ''}
+                    onChange={(e) =>
+                      updateMetadata(doc.id, e.target.value, doc.tags || '')
+                    }
+                    style={{ width: 80 }}
+                  />
+                </td>
+                <td>
+                  <input
+                    value={doc.tags || ''}
+                    onChange={(e) =>
+                      updateMetadata(doc.id, doc.category || '', e.target.value)
+                    }
+                    style={{ width: 120 }}
+                  />
+                </td>
                 <td>
                   <button onClick={() => showInFinder(doc.path)}>🔍</button>
                   <button onClick={() => openFile(doc.path)} style={{ marginLeft: 5 }}>▶</button>

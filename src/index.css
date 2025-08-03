@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+html, body, #root {
+height: 100%;
+margin: 0;
+font-family: 'Roboto', sans-serif;
+background-color: #f5f7fa;
+}
+
+h1 {
+margin-bottom: 20px;
+}
+
+button {
+cursor: pointer;
+}
+
+.MuiTable-root th {
+background-color: #f0f2f5;
+font-weight: bold;
+}
+
+.MuiTableRow-root:hover {
+background-color: #f9fafb;
+}
+
+.drag-over {
+border: 2px dashed #736efe;
+background-color: rgba(115, 110, 254, 0.05);
+
+pointer-events: none;
+}
+.drag-over * {
+pointer-events: auto;
+}
+
+.chip-container {
+display: flex;
+flex-wrap: wrap;
+gap: 4px;
+}
+
+.chip-container .MuiChip-root {
+margin: 2px;
+}
+
+.add-tag-input {
+width: 80px;
+margin-top: 2px;
+}
+
+.action-buttons button {
+min-width: 30px;
+margin-right: 2px;
+}
+

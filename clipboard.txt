@@ -1,0 +1,37 @@
+# Create Tree Diagram
+
+tree -I "node_modules|.git|package-lock.json|database.sqlite|clipboard.txt|next_steps.txt"
+
+# command for chat gpt to add after code
+------------------------------------------------------------------------------------------------------------------------------------
+
+"I am pasting my entire project code into this chat as a single text block. After that, I will provide a list of new features or changes I want to implement. Your task is to:
+
+Analyze the existing project code.
+
+Integrate the requested features or changes.
+
+Return the updated full file contents for each file that needs to be modified or newly created, formatted as:
+
+--- filename.py ---
+<updated content>
+
+--- another_file.js ---
+<updated content>
+
+Do not summarize changes; always return the complete files ready to replace in my project.
+If new files are required, include them in the same format.
+If some files remain unchanged, do not repeat them."
+
+------------------------------------------------------------------------------------------------------------------------------------
+### Node.js
+
+### Electron
+
+## Text
+
+### Markdown
+
+### JSON
+
+### XML

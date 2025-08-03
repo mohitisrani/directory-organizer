@@ -47,3 +47,14 @@ Watch Folders: Automatically detect new files in selected folders (using chokida
 Sorting & Columns: Allow sorting by date, size, name.
 
 Multi-select actions: Delete, open multiple files at once.
+
+
+Next Steps:
+
+Add color-coded tag chips.
+Highlight drop area when dragging files/folders.
+Show a toast or badge for “X files added”.
+Show PDF thumbnails or image previews in a side panel.
+Allow sorting by date, size, name.
+Multi-select actions: Delete, open multiple files at once.
+Use Material UI 

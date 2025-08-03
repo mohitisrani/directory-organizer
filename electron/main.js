@@ -56,7 +56,22 @@ app.whenReady().then(() => {
 // IPC HANDLERS
 //
 
-ipcMain.handle('get-documents', () => db.prepare('SELECT * FROM documents').all());
+// Fetch all documents
+ipcMain.handle('get-documents', async () => {
+  return db.prepare('SELECT * FROM documents').all();
+});
+
+// Update category/tags
+ipcMain.handle('update-document', async (_, { id, category, tags }) => {
+  if (category !== undefined) {
+    db.prepare('UPDATE documents SET category = ? WHERE id = ?').run(category, id);
+  }
+  if (tags !== undefined) {
+    db.prepare('UPDATE documents SET tags = ? WHERE id = ?').run(tags, id);
+  }
+  const updatedDocs = db.prepare('SELECT * FROM documents').all();
+  mainWindow.webContents.send('documents-updated', updatedDocs);
+});
 
 ipcMain.handle('delete-document', (event, docId) => {
   db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
