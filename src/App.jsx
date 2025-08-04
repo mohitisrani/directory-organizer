@@ -3,16 +3,14 @@ import DocumentsTable from './components/DocumentsTable.jsx';
 
 function App() {
 
-  const addDocumentFromFile = async () => {
-    const newDoc = await window.electron.invoke('pick-and-add-document');
-    if (!newDoc) return;
-    if (newDoc.duplicate) {
-      alert(`⚠ ${newDoc.name} is already in the database.`);
-      return;
-    }
+  const addDocumentsFromFiles = async () => {
+    const newDocs = await window.electron.invoke('pick-and-add-documents');
+    if (!newDocs || newDocs.length === 0) return;
   
-    // ✅ Generate embedding for the new doc
-    await window.electron.invoke('generate-document-embedding', newDoc.id);
+    for (const doc of newDocs) {
+      // Generate embeddings for each new doc
+      await window.electron.invoke('generate-document-embedding', doc.id);
+    }
   };
 
   const pickDirectory = async () => {
@@ -57,8 +55,8 @@ function App() {
 
         {/* Action Buttons */}
         <div className="bg-white shadow rounded-xl p-4 flex flex-wrap justify-center gap-3">
-          <button onClick={addDocumentFromFile} className="px-4 py-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition">
-            📄 Add File
+          <button onClick={addDocumentsFromFiles} className="px-4 py-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition">
+            📄 Add Files
           </button>
           <button onClick={pickDirectory} className="px-4 py-2 bg-green-500 text-white rounded-full shadow hover:bg-green-600 transition">
             📁 Add Directory

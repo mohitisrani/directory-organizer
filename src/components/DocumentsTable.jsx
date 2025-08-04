@@ -10,11 +10,13 @@ export default function DocumentsTable() {
   const [previewFile, setPreviewFile] = useState(null);
   const [semanticQuery, setSemanticQuery] = useState('');
   const [semanticResults, setSemanticResults] = useState([]);
+  const [selectedDocs, setSelectedDocs] = useState([]);
 
   const runSemanticSearch = async () => {
-  if (!semanticQuery.trim()) return;
-  const results = await window.electron.invoke('semantic-search', semanticQuery, 5);
-  setSemanticResults(results);
+    if (!semanticQuery.trim()) return;
+    const results = await window.electron.invoke('semantic-search', semanticQuery, 5);
+    setSemanticResults(results);
+    setSelectedDocs([]); // clear selection on new search
   };
 
   const refreshDocuments = async () => {
@@ -34,7 +36,6 @@ export default function DocumentsTable() {
       }
     }
   };
-  
 
   useEffect(() => {
     refreshDocuments();
@@ -51,6 +52,15 @@ export default function DocumentsTable() {
     if (confirm('Are you sure you want to delete this document from the database?')) {
       window.electron.invoke('delete-document', id);
     }
+  };
+
+  const deleteSelectedDocuments = async () => {
+    if (selectedDocs.length === 0) return;
+    if (!confirm(`Delete ${selectedDocs.length} selected documents?`)) return;
+    for (const id of selectedDocs) {
+      await window.electron.invoke('delete-document', id);
+    }
+    setSelectedDocs([]);
   };
 
   const viewFile = async (filePath, name) => {
@@ -79,6 +89,21 @@ export default function DocumentsTable() {
     updateDocument(doc.id, { tags: newTags });
   };
 
+  // ---------- Multi-Select ----------
+  const toggleSelect = (docId) => {
+    setSelectedDocs(prev => 
+      prev.includes(docId) ? prev.filter(id => id !== docId) : [...prev, docId]
+    );
+  };
+
+  const selectAll = () => {
+    const ids = displayedDocs.map(doc => doc.id);
+    setSelectedDocs(ids);
+  };
+
+  const clearSelection = () => setSelectedDocs([]);
+
+  // ---------- Filtering ----------
   const filteredDocs = documents.filter(doc => {
     const query = searchQuery.toLowerCase();
     return (
@@ -88,27 +113,14 @@ export default function DocumentsTable() {
       (doc.tags || '').toLowerCase().includes(query)
     );
   });
+
   const displayedDocs = semanticResults.length > 0 ? semanticResults : filteredDocs;
-
-  function highlightText(text, query) {
-    if (!query) return text;
-    const words = query.trim().split(/\s+/);
-    const regex = new RegExp(`(${words.join('|')})`, 'gi');
-    return text.split(regex).map((part, i) =>
-      words.some(w => w.toLowerCase() === part.toLowerCase()) ? (
-        <strong key={i} className="text-indigo-600">{part}</strong>
-      ) : (
-        part
-      )
-    );
-  }
-  
-
 
   return (
     <div className="space-y-4">
       <h2 className="text-2xl font-semibold text-gray-800 mb-2">Your Documents</h2>
 
+      {/* Text search */}
       <input
         type="text"
         placeholder="Search by name, path, category, or tags..."
@@ -117,39 +129,67 @@ export default function DocumentsTable() {
         className="w-full p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
       />
 
-     <div className="flex gap-2 my-4">
+      {/* Semantic search */}
+      <div className="flex gap-2 my-4">
         <input
-            type="text"
-            placeholder="Ask in natural language..."
-            value={semanticQuery}
-            onChange={(e) => setSemanticQuery(e.target.value)}
-            className="flex-1 p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          type="text"
+          placeholder="Ask in natural language..."
+          value={semanticQuery}
+          onChange={(e) => setSemanticQuery(e.target.value)}
+          className="flex-1 p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
         />
         <button
-            onClick={runSemanticSearch}
-            className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
+          onClick={runSemanticSearch}
+          className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
         >
-            🔍 Semantic Search
+          🔍 Semantic Search
         </button>
-     </div>
+      </div>
 
-     {semanticResults.length > 0 && (
+      {semanticResults.length > 0 && (
         <div className="text-sm text-indigo-600 font-medium mb-2">
-            Showing top {semanticResults.length} semantic matches for "{semanticQuery}"
-            <button 
+          Showing top {semanticResults.length} semantic matches for "{semanticQuery}"
+          <button 
             onClick={() => setSemanticResults([])} 
             className="ml-2 text-red-500 hover:underline"
-            >
+          >
             Clear
-            </button>
+          </button>
         </div>
-     )}
+      )}
 
-     <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
-    
+      {/* Bulk Action Toolbar */}
+      {selectedDocs.length > 0 && (
+        <div className="flex gap-2 mb-4 items-center">
+          <span className="text-sm text-gray-600">
+            {selectedDocs.length} selected
+          </span>
+          <button
+            onClick={deleteSelectedDocuments}
+            className="px-3 py-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
+          >
+            🗑 Delete Selected
+          </button>
+          <button
+            onClick={clearSelection}
+            className="px-3 py-1 bg-gray-400 text-white rounded-full hover:bg-gray-500 transition"
+          >
+            ✖ Clear Selection
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
         <table className="min-w-full border-collapse overflow-hidden rounded-2xl">
-        <thead className="bg-gray-50 text-gray-700 text-sm">
+          <thead className="bg-gray-50 text-gray-700 text-sm">
             <tr>
+              <th className="p-3 text-center">
+                <input 
+                  type="checkbox"
+                  checked={selectedDocs.length === displayedDocs.length && displayedDocs.length > 0}
+                  onChange={(e) => e.target.checked ? selectAll() : clearSelection()}
+                />
+              </th>
               <th className="p-3 text-left">File Name</th>
               <th className="p-3 text-left">Path</th>
               <th className="p-3 text-left">Category</th>
@@ -169,6 +209,13 @@ export default function DocumentsTable() {
                   idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
                 } ${doc.missing ? 'bg-red-50' : ''}`}
               >
+                <td className="p-3 text-center">
+                  <input
+                    type="checkbox"
+                    checked={selectedDocs.includes(doc.id)}
+                    onChange={() => toggleSelect(doc.id)}
+                  />
+                </td>
                 <td className="p-3 font-medium text-gray-800">{doc.name}</td>
                 <td className="p-3 text-xs text-gray-500">{doc.path}</td>
                 <td className="p-3">
@@ -204,7 +251,6 @@ export default function DocumentsTable() {
                     className="w-full border rounded-full p-1 px-2 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
                 </td>
-                {/* Conditional Snippet */}
                 {semanticResults.length > 0 && (
                   <td className="p-3 text-xs text-gray-600 max-w-xs truncate" title={doc.snippet}>
                     {doc.snippet && (
@@ -218,35 +264,35 @@ export default function DocumentsTable() {
                   {doc.missing ? '⚠️ Missing' : 'No'}
                 </td>
                 <td className="p-3 text-center space-x-2">
-                    <button 
-                        onClick={() => viewFile(doc.path, doc.name)}
-                        className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 
-                                    transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
-                        title="Preview File"
-                        >
-                        <EyeIcon className="w-4 h-4" />
-                    </button>
-                    <button 
-                        onClick={() => showInFinder(doc.path)}
-                        className="p-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition"
-                        title="Show in Finder"
-                    >
-                        <FolderIcon className="w-4 h-4" />
-                    </button>
-                    <button 
-                        onClick={() => deleteDocument(doc.id)}
-                        className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
-                        title="Delete Document"
-                    >
-                        <TrashIcon className="w-4 h-4" />
-                    </button>
+                  <button 
+                    onClick={() => viewFile(doc.path, doc.name)}
+                    className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 
+                                transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
+                    title="Preview File"
+                  >
+                    <EyeIcon className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => showInFinder(doc.path)}
+                    className="p-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition"
+                    title="Show in Finder"
+                  >
+                    <FolderIcon className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => deleteDocument(doc.id)}
+                    className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
+                    title="Delete Document"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                  </button>
                 </td>
-
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
       {/* File Preview Modal */}
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
     </div>

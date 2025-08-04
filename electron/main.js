@@ -80,32 +80,63 @@ ipcMain.handle('update-document', async (_, { id, category, tags }) => {
   mainWindow.webContents.send('documents-updated', updatedDocs);
 });
 
-ipcMain.handle('delete-document', (event, docId) => {
-  db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+// Safe delete-document handler with chunk cleanup
+ipcMain.handle('delete-document', (event, docIds) => {
+  // Support both single ID and array of IDs
+  const ids = Array.isArray(docIds) ? docIds : [docIds];
+
+  const deleteChunks = db.prepare('DELETE FROM document_chunks WHERE document_id = ?');
+  const deleteDoc = db.prepare('DELETE FROM documents WHERE id = ?');
+
+  const transaction = db.transaction((idsToDelete) => {
+    for (const id of idsToDelete) {
+      // Delete chunks first to avoid FK errors
+      deleteChunks.run(id);
+      deleteDoc.run(id);
+    }
+  });
+
+  transaction(ids);
+
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
   mainWindow.webContents.send('documents-updated', updatedDocs);
+
   return true;
 });
 
-ipcMain.handle('pick-and-add-document', async () => {
-  const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openFile'] });
+
+ipcMain.handle('pick-and-add-documents', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections']
+  });
+
   if (canceled || filePaths.length === 0) return null;
 
-  const filePath = filePaths[0];
-  const fileName = path.basename(filePath);
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)'
+  );
 
-  // Prevent duplicates
-  const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(filePath);
-  if (exists) return { duplicate: true, name: fileName, path: filePath };
+  const newDocs = [];
 
-  const meta = getFileMetadata(filePath);
-  db.prepare('INSERT INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)')
-    .run(fileName, filePath, meta.size, meta.lastModified);
+  for (const filePath of filePaths) {
+    const fileName = path.basename(filePath);
+
+    // Skip duplicates
+    const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(filePath);
+    if (exists) continue;
+
+    const meta = getFileMetadata(filePath);
+    insert.run(fileName, filePath, meta.size, meta.lastModified);
+
+    const doc = db.prepare('SELECT * FROM documents WHERE path = ?').get(filePath);
+    newDocs.push(doc);
+  }
 
   const updatedDocs = db.prepare('SELECT * FROM documents').all();
   mainWindow.webContents.send('documents-updated', updatedDocs);
-  return updatedDocs[updatedDocs.length - 1];
+  return newDocs;
 });
+
 
 ipcMain.handle('pick-directory', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
