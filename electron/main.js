@@ -323,27 +323,53 @@ async function generateEmbedding(text) {
 }
 
 // Generate embedding for one document
+function chunkText(text, chunkSize = 1000, overlap = 100) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    chunks.push(text.slice(start, end));
+    start += chunkSize - overlap;
+  }
+  return chunks;
+}
+
 ipcMain.handle('generate-document-embedding', async (_, docId) => {
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
   if (!doc) return null;
 
-  // Extract text safely
   const text = await extractText(doc.path);
   if (!text.trim()) {
     console.warn('⚠️ No text extracted for embedding:', doc.path);
     return null;
   }
 
-  // Generate & store embedding
-  const embedding = await generateEmbedding(text);
-  if (!embedding) return null;
+  const chunks = chunkText(text, 1000, 100); // ~1k chars with 100 overlap
+  const model = await getEmbedder();
+  let totalEmbeddings = 0;
 
-  db.prepare('UPDATE documents SET embedding=? WHERE id=?')
-    .run(JSON.stringify(embedding), docId);
+  // Remove old chunks if regenerating
+  db.prepare('DELETE FROM document_chunks WHERE document_id=?').run(docId);
 
-  console.log('✅ Embedding generated for', doc.path);
-  return embedding;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const output = await model(chunk, { pooling: 'mean', normalize: true });
+    const embedding = Array.from(output.data);
+
+    db.prepare(`
+      INSERT INTO document_chunks (document_id, chunk_index, content, embedding)
+      VALUES (?, ?, ?, ?)
+    `).run(docId, i, chunk, JSON.stringify(embedding));
+
+    totalEmbeddings++;
+  }
+
+  console.log(`✅ Generated ${totalEmbeddings} chunk embeddings for ${doc.name}`);
+
+  // Keep doc.embedding as NULL for now to not break existing logic
+  return totalEmbeddings;
 });
+
 
 
 // Cosine similarity
@@ -362,30 +388,49 @@ ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
   console.log(`🔍 Semantic search started for query: "${query}"`);
 
   const qEmbed = await generateEmbedding(query);
-  if (!qEmbed) {
-    console.warn('⚠️ No embedding generated for query');
+  if (!qEmbed) return [];
+
+  const chunks = db.prepare('SELECT * FROM document_chunks').all();
+  if (chunks.length === 0) {
+    console.warn('⚠️ No chunk embeddings found.');
     return [];
   }
 
-  const docs = db.prepare('SELECT * FROM documents WHERE embedding IS NOT NULL').all();
-
-  const scored = docs.map(doc => {
-    const embedding = JSON.parse(doc.embedding);
+  // Score all chunks
+  const scoredChunks = chunks.map(chunk => {
+    const embedding = JSON.parse(chunk.embedding);
     const score = cosineSimilarity(qEmbed, embedding);
-    
-    // Log scores to console
-    console.log(`📄 [${doc.id}] ${doc.name} → score: ${score.toFixed(4)}`);
-    
-    return { ...doc, score };
+    return { ...chunk, score };
   });
 
-  scored.sort((a, b) => b.score - a.score);
+  // Group by document and keep only top chunk per doc
+  const bestChunksByDoc = {};
+  for (const chunk of scoredChunks) {
+    const docId = chunk.document_id;
+    if (!bestChunksByDoc[docId] || bestChunksByDoc[docId].score < chunk.score) {
+      bestChunksByDoc[docId] = chunk;
+    }
+  }
 
-  console.log(`✅ Top ${topK} results for "${query}":`);
-  scored.slice(0, topK).forEach((doc, idx) =>
-    console.log(`   ${idx + 1}. ${doc.name} (score: ${doc.score.toFixed(4)})`)
-  );
+  // Convert to array and sort by score
+  const topDocs = Object.values(bestChunksByDoc)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK)
+    .map(chunk => {
+      const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(chunk.document_id);
+      return {
+        ...doc,
+        score: chunk.score,
+        snippet: chunk.content.slice(0, 200) + (chunk.content.length > 200 ? '...' : '')
+      };
+    });
 
-  return scored.slice(0, topK);
+  console.log(`✅ Top ${topK} semantic results for "${query}":`);
+  topDocs.forEach((res, i) => console.log(` ${i + 1}. ${res.name} → ${res.score.toFixed(4)}`));
+
+  return topDocs;
 });
+
+
+
 

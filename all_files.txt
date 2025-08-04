@@ -38,20 +38,20 @@ find . \
   -type f \
   ! -path "*/node_modules/*" \
   ! -path "*/.git/*" \
+  ! -path "*/test/*" \
   ! -path "*/package-lock.json" \
   ! -path "*/database.sqlite" \
   ! -path "*/all_files.txt" \
   ! -path "*/next_steps.txt" \
   ! -path "*/clipboard.txt" \
+  ! -path "*/.gitignore" \
+  ! -path "*/eng.traineddata" \
   | while read file; do
       echo "# ${file#/path/to/root/}"
       echo "# ${file#/path/to/root/}" >> all_files.txt
       cat "$file" >> all_files.txt
       echo "" >> all_files.txt
     done
-
-# ./.gitignore
-node_modules
 
 # ./package.json
 {
@@ -68,10 +68,18 @@ node_modules
   "dependencies": {
     "@headlessui/react": "^2.2.7",
     "@heroicons/react": "^2.2.0",
+    "@xenova/transformers": "^2.17.2",
     "better-sqlite3": "^9.6.0",
     "electron": "^29.0.0",
+    "mammoth": "^1.10.0",
+    "openai": "^5.11.0",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pdf-poppler": "^0.2.1",
     "react": "^18.0.0",
-    "react-dom": "^18.0.0"
+    "react-dom": "^18.0.0",
+    "sqlite": "^5.1.1",
+    "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.11",
@@ -101,6 +109,8 @@ contextBridge.exposeInMainWorld('electron', {
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import pdf from 'pdf-parse';
+import { pipeline } from '@xenova/transformers';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,9 +127,13 @@ db.prepare(`
     size INTEGER,
     lastModified TEXT,
     category TEXT DEFAULT '',
-    tags TEXT DEFAULT ''
+    tags TEXT DEFAULT '',
+    embedding TEXT DEFAULT NULL  -- store JSON array of embedding
   )
 `).run();
+
+try { db.prepare('ALTER TABLE documents ADD COLUMN embedding TEXT DEFAULT NULL').run(); } catch {}
+
 
 // Migration in case old DB exists
 try {
@@ -140,6 +154,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import db from './db.js';
+import { pipeline } from '@xenova/transformers';
+import pdf from 'pdf-parse'; // ✅ Needed for extractText()
+
+import { PDFDocument } from 'pdf-lib';
+import Tesseract from 'tesseract.js';
+
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -347,9 +368,179 @@ ipcMain.handle('import-db', async () => {
 
 
 ipcMain.handle('file-exists', (_, filePath) => {
-  const fs = require('fs');
   return fs.existsSync(filePath);
 });
+
+ipcMain.handle('read-file-content', async (_, filePath) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+
+    // --- TEXT ---
+    if (['.txt', '.md', '.json', '.log', '.csv'].includes(ext)) {
+      const data = fs.readFileSync(filePath, 'utf-8');
+      return { type: 'text', content: data.slice(0, 5000) };
+    }
+
+    // --- IMAGE as Base64 ---
+    if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
+      const data = fs.readFileSync(filePath);
+      const base64 = `data:image/${ext.replace('.', '')};base64,${data.toString('base64')}`;
+      return { type: 'image', content: base64 };
+    }
+
+    // --- PDF as Base64 ---
+    if (ext === '.pdf') {
+      const data = fs.readFileSync(filePath);
+      const base64 = `data:application/pdf;base64,${data.toString('base64')}`;
+      return { type: 'pdf', content: base64 };
+    }
+
+    return { type: 'unsupported', content: null };
+  } catch (err) {
+    console.error('Error reading file for preview:', err);
+    return { type: 'error', content: null };
+  }
+});
+
+let embedder = null;
+async function getEmbedder() {
+  if (!embedder) {
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return embedder;
+}
+
+
+// -------------------- TEXT EXTRACTION & EMBEDDINGS --------------------
+
+async function extractText(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      console.warn('⚠️ File not found, skipping embedding:', filePath);
+      return '';
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+
+    // 1. Text-based files
+    if (['.txt', '.md', '.csv', '.json', '.log'].includes(ext)) {
+      return fs.readFileSync(filePath, 'utf-8').slice(0, 20000);
+    }
+
+    // 2. PDF: Try pdf-parse first
+    if (ext === '.pdf') {
+      const absPath = path.resolve(filePath);
+      const dataBuffer = fs.readFileSync(absPath);
+      const pdfData = await pdf(dataBuffer);
+
+      let extractedText = (pdfData.text || '').trim();
+
+      // 3. Fallback to OCR if very little text
+      if (extractedText.length < 50) {
+        console.log('⚡ Running OCR on PDF images:', filePath);
+        const tempDir = path.join(__dirname, 'ocr-temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+        // Convert PDF to PNG images using poppler
+        execSync(`pdftoppm "${absPath}" "${tempDir}/page" -png`);
+
+        // Process each page
+        const pngFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.png'));
+        for (const pngFile of pngFiles) {
+          console.log('🖼 OCR processing:', pngFile);
+          const imgPath = path.join(tempDir, pngFile);
+          const { data: { text } } = await Tesseract.recognize(imgPath, 'eng');
+          extractedText += '\n' + text;
+          fs.unlinkSync(imgPath); // cleanup page image
+        }
+      }
+
+      return extractedText.slice(0, 20000);
+    }
+
+    return '';
+  } catch (err) {
+    console.error('❌ OCR/Text extraction failed for', filePath, err);
+    return '';
+  }
+}
+
+// Generate embedding
+async function generateEmbedding(text) {
+  if (!text || !text.trim()) return null;
+  const model = await getEmbedder();
+  const output = await model(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data); // Float32Array → JS Array
+}
+
+// Generate embedding for one document
+ipcMain.handle('generate-document-embedding', async (_, docId) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
+  if (!doc) return null;
+
+  // Extract text safely
+  const text = await extractText(doc.path);
+  if (!text.trim()) {
+    console.warn('⚠️ No text extracted for embedding:', doc.path);
+    return null;
+  }
+
+  // Generate & store embedding
+  const embedding = await generateEmbedding(text);
+  if (!embedding) return null;
+
+  db.prepare('UPDATE documents SET embedding=? WHERE id=?')
+    .run(JSON.stringify(embedding), docId);
+
+  console.log('✅ Embedding generated for', doc.path);
+  return embedding;
+});
+
+
+// Cosine similarity
+function cosineSimilarity(vecA, vecB) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Semantic search IPC
+ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
+  console.log(`🔍 Semantic search started for query: "${query}"`);
+
+  const qEmbed = await generateEmbedding(query);
+  if (!qEmbed) {
+    console.warn('⚠️ No embedding generated for query');
+    return [];
+  }
+
+  const docs = db.prepare('SELECT * FROM documents WHERE embedding IS NOT NULL').all();
+
+  const scored = docs.map(doc => {
+    const embedding = JSON.parse(doc.embedding);
+    const score = cosineSimilarity(qEmbed, embedding);
+    
+    // Log scores to console
+    console.log(`📄 [${doc.id}] ${doc.name} → score: ${score.toFixed(4)}`);
+    
+    return { ...doc, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  console.log(`✅ Top ${topK} results for "${query}":`);
+  scored.slice(0, topK).forEach((doc, idx) =>
+    console.log(`   ${idx + 1}. ${doc.name} (score: ${doc.score.toFixed(4)})`)
+  );
+
+  return scored.slice(0, topK);
+});
+
+
 # ./postcss.config.js
 export default {
     plugins: {
@@ -432,17 +623,26 @@ margin-right: 2px;
 
 # ./src/components/DocumentsTable.jsx
 import React, { useState, useEffect } from 'react';
-import { XMarkIcon } from '@heroicons/react/24/solid';
+import FilePreviewModal from './FilePreviewModal.jsx';
+import { EyeIcon, FolderIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/solid';
 
 const CATEGORY_OPTIONS = ['Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'];
 
 export default function DocumentsTable() {
   const [documents, setDocuments] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [previewFile, setPreviewFile] = useState(null);
+  const [semanticQuery, setSemanticQuery] = useState('');
+  const [semanticResults, setSemanticResults] = useState([]);
+
+  const runSemanticSearch = async () => {
+  if (!semanticQuery.trim()) return;
+  const results = await window.electron.invoke('semantic-search', semanticQuery, 5);
+  setSemanticResults(results);
+  };
 
   const refreshDocuments = async () => {
     const docs = await window.electron.invoke('get-documents');
-    // Mark missing files
     const checked = await Promise.all(
       docs.map(async (doc) => {
         const exists = await window.electron.invoke('file-exists', doc.path);
@@ -450,7 +650,15 @@ export default function DocumentsTable() {
       })
     );
     setDocuments(checked);
+  
+    // ✅ Generate embeddings for any docs that don't have them
+    for (const doc of checked) {
+      if (!doc.embedding) {
+        await window.electron.invoke('generate-document-embedding', doc.id);
+      }
+    }
   };
+  
 
   useEffect(() => {
     refreshDocuments();
@@ -469,7 +677,11 @@ export default function DocumentsTable() {
     }
   };
 
-  const viewFile = (filePath) => window.electron.invoke('open-file', filePath);
+  const viewFile = async (filePath, name) => {
+    const fileData = await window.electron.invoke('read-file-content', filePath);
+    setPreviewFile({ ...fileData, name });
+  };
+  
   const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
 
   const handleTagAdd = (doc, e) => {
@@ -500,6 +712,8 @@ export default function DocumentsTable() {
       (doc.tags || '').toLowerCase().includes(query)
     );
   });
+  const displayedDocs = semanticResults.length > 0 ? semanticResults : filteredDocs;
+
 
   return (
     <div className="space-y-4">
@@ -513,7 +727,36 @@ export default function DocumentsTable() {
         className="w-full p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
       />
 
-      <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
+     <div className="flex gap-2 my-4">
+        <input
+            type="text"
+            placeholder="Ask in natural language..."
+            value={semanticQuery}
+            onChange={(e) => setSemanticQuery(e.target.value)}
+            className="flex-1 p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+        />
+        <button
+            onClick={runSemanticSearch}
+            className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
+        >
+            🔍 Semantic Search
+        </button>
+     </div>
+
+     {semanticResults.length > 0 && (
+        <div className="text-sm text-indigo-600 font-medium mb-2">
+            Showing top {semanticResults.length} semantic matches for "{semanticQuery}"
+            <button 
+            onClick={() => setSemanticResults([])} 
+            className="ml-2 text-red-500 hover:underline"
+            >
+            Clear
+            </button>
+        </div>
+     )}
+
+     <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
+    
         <table className="min-w-full border-collapse overflow-hidden rounded-2xl">
           <thead className="bg-gray-50 text-gray-700 text-sm">
             <tr>
@@ -526,7 +769,7 @@ export default function DocumentsTable() {
             </tr>
           </thead>
           <tbody>
-            {filteredDocs.map((doc, idx) => (
+            {displayedDocs.map((doc, idx) => (
               <tr
                 key={doc.id}
                 className={`border-t border-gray-100 hover:bg-gray-50 transition ${
@@ -572,14 +815,90 @@ export default function DocumentsTable() {
                   {doc.missing ? '⚠️ Missing' : 'No'}
                 </td>
                 <td className="p-3 text-center space-x-2">
-                  <button onClick={() => viewFile(doc.path)} className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">View</button>
-                  <button onClick={() => showInFinder(doc.path)} className="px-2 py-1 text-xs bg-gray-500 text-white rounded hover:bg-gray-600">Finder</button>
-                  <button onClick={() => deleteDocument(doc.id)} className="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600">Delete</button>
+                    <button 
+                        onClick={() => viewFile(doc.path, doc.name)}
+                        className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 
+                                    transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
+                        title="Preview File"
+                        >
+                        <EyeIcon className="w-4 h-4" />
+                    </button>
+                    <button 
+                        onClick={() => showInFinder(doc.path)}
+                        className="p-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition"
+                        title="Show in Finder"
+                    >
+                        <FolderIcon className="w-4 h-4" />
+                    </button>
+                    <button 
+                        onClick={() => deleteDocument(doc.id)}
+                        className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
+                        title="Delete Document"
+                    >
+                        <TrashIcon className="w-4 h-4" />
+                    </button>
                 </td>
+
               </tr>
             ))}
           </tbody>
         </table>
+      </div>
+      {/* File Preview Modal */}
+      <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+    </div>
+  );
+}
+
+# ./src/components/FilePreviewModal.jsx
+import React from 'react';
+
+export default function FilePreviewModal({ file, onClose }) {
+  if (!file) return null;
+
+  const { type, content, name } = file;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+      <div className="bg-white rounded-2xl shadow-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        
+        {/* Header */}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h2 className="text-lg font-semibold">{name} Preview</h2>
+          <button 
+            onClick={onClose} 
+            className="text-gray-500 hover:text-gray-800 transition text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-4 bg-gray-50">
+          {type === 'text' && (
+            <pre className="whitespace-pre-wrap text-sm font-mono">{content}</pre>
+          )}
+
+          {type === 'image' && (
+            <img src={content} alt="Preview" className="max-h-[70vh] mx-auto" />
+          )}
+
+          {type === 'pdf' && (
+            <iframe src={content} className="w-full h-[70vh]" title="PDF Preview" />
+          )}
+
+          {type === 'unsupported' && (
+            <p className="text-gray-500 text-center mt-10">
+              ⚠️ This file type is not supported for preview.
+            </p>
+          )}
+
+          {type === 'error' && (
+            <p className="text-red-500 text-center mt-10">
+              ❌ Could not load file content.
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -607,11 +926,23 @@ function App() {
   const addDocumentFromFile = async () => {
     const newDoc = await window.electron.invoke('pick-and-add-document');
     if (!newDoc) return;
-    if (newDoc.duplicate) alert(`⚠ ${newDoc.name} is already in the database.`);
+    if (newDoc.duplicate) {
+      alert(`⚠ ${newDoc.name} is already in the database.`);
+      return;
+    }
+  
+    // ✅ Generate embedding for the new doc
+    await window.electron.invoke('generate-document-embedding', newDoc.id);
   };
 
   const pickDirectory = async () => {
-    await window.electron.invoke('pick-directory');
+    const addedDocs = await window.electron.invoke('pick-directory');
+    if (!addedDocs) return;
+  
+    // ✅ Generate embeddings for each new doc
+    for (const doc of addedDocs) {
+      await window.electron.invoke('generate-document-embedding', doc.id);
+    }
   };
 
   const checkMissingFiles = async () => {

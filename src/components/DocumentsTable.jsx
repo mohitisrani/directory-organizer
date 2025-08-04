@@ -90,6 +90,20 @@ export default function DocumentsTable() {
   });
   const displayedDocs = semanticResults.length > 0 ? semanticResults : filteredDocs;
 
+  function highlightText(text, query) {
+    if (!query) return text;
+    const words = query.trim().split(/\s+/);
+    const regex = new RegExp(`(${words.join('|')})`, 'gi');
+    return text.split(regex).map((part, i) =>
+      words.some(w => w.toLowerCase() === part.toLowerCase()) ? (
+        <strong key={i} className="text-indigo-600">{part}</strong>
+      ) : (
+        part
+      )
+    );
+  }
+  
+
 
   return (
     <div className="space-y-4">
@@ -134,12 +148,15 @@ export default function DocumentsTable() {
      <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
     
         <table className="min-w-full border-collapse overflow-hidden rounded-2xl">
-          <thead className="bg-gray-50 text-gray-700 text-sm">
+        <thead className="bg-gray-50 text-gray-700 text-sm">
             <tr>
               <th className="p-3 text-left">File Name</th>
               <th className="p-3 text-left">Path</th>
               <th className="p-3 text-left">Category</th>
               <th className="p-3 text-left">Tags</th>
+              {semanticResults.length > 0 && (
+                <th className="p-3 text-left">Snippet</th>
+              )}
               <th className="p-3 text-center">Missing?</th>
               <th className="p-3 text-center">Actions</th>
             </tr>
@@ -187,6 +204,16 @@ export default function DocumentsTable() {
                     className="w-full border rounded-full p-1 px-2 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
                 </td>
+                {/* Conditional Snippet */}
+                {semanticResults.length > 0 && (
+                  <td className="p-3 text-xs text-gray-600 max-w-xs truncate" title={doc.snippet}>
+                    {doc.snippet && (
+                      <span className="italic">
+                        “{doc.snippet}”
+                      </span>
+                    )}
+                  </td>
+                )}
                 <td className="p-3 text-center font-semibold">
                   {doc.missing ? '⚠️ Missing' : 'No'}
                 </td>

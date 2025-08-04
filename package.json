@@ -7,7 +7,8 @@
     "dev:react": "vite",
     "dev:electron": "wait-on tcp:5173 && electron .",
     "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
-    "postinstall": "electron-rebuild"
+    "postinstall": "electron-rebuild",
+    "migrate:chunks": "node electron/migrate_chunks.js"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.7",
