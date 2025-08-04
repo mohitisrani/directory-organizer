@@ -462,6 +462,48 @@ ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
   return topDocs;
 });
 
+// ---- Collections CRUD ----
+ipcMain.handle('get-collections', () => {
+  return db.prepare('SELECT * FROM collections ORDER BY createdAt DESC').all();
+});
+
+ipcMain.handle('create-collection', (_, { name, description = '', color = null }) => {
+  const stmt = db.prepare('INSERT INTO collections (name, description, color) VALUES (?, ?, ?)');
+  const info = stmt.run(name, description, color);
+  return { id: info.lastInsertRowid, name, description, color };
+});
+
+ipcMain.handle('delete-collection', (_, collectionId) => {
+  db.prepare('DELETE FROM collection_documents WHERE collection_id=?').run(collectionId);
+  db.prepare('DELETE FROM collections WHERE id=?').run(collectionId);
+  return true;
+});
+
+// ---- Collection Documents ----
+ipcMain.handle('get-collection-docs', (_, collectionId) => {
+  return db.prepare(`
+    SELECT d.*
+    FROM documents d
+    JOIN collection_documents cd ON d.id = cd.document_id
+    WHERE cd.collection_id=?
+  `).all(collectionId);
+});
+
+ipcMain.handle('add-docs-to-collection', (_, { collectionId, docIds }) => {
+  const insert = db.prepare('INSERT OR IGNORE INTO collection_documents (collection_id, document_id) VALUES (?, ?)');
+  const tx = db.transaction((ids) => {
+    for (const docId of ids) insert.run(collectionId, docId);
+  });
+  tx(docIds);
+  return true;
+});
+
+ipcMain.handle('remove-doc-from-collection', (_, { collectionId, docId }) => {
+  db.prepare('DELETE FROM collection_documents WHERE collection_id=? AND document_id=?')
+    .run(collectionId, docId);
+  return true;
+});
+
 
 
 

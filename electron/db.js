@@ -39,4 +39,25 @@ try {
 db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)').run();
 db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_lastModified ON documents(lastModified)').run();
 
+db.prepare(`
+  -- 1. Collections Table
+  CREATE TABLE IF NOT EXISTS collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      color TEXT DEFAULT NULL,
+      createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`).run();
+
+db.prepare(`-- 2. Relationship Table (Many-to-Many)
+  CREATE TABLE IF NOT EXISTS collection_documents (
+      collection_id INTEGER,
+      document_id INTEGER,
+      PRIMARY KEY (collection_id, document_id),
+      FOREIGN KEY (collection_id) REFERENCES collections(id),
+      FOREIGN KEY (document_id) REFERENCES documents(id)
+  );
+`).run();
+
 export default db;

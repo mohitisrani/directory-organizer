@@ -1,7 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import DocumentsTable from './components/DocumentsTable.jsx';
+import Collections from './components/Collections.jsx';
+import CollectionView from './components/CollectionView.jsx';
 
 function App() {
+
+  const [view, setView] = useState('docs');
+  const [selectedCollection, setSelectedCollection] = useState(null);
 
   const addDocumentsFromFiles = async () => {
     const newDocs = await window.electron.invoke('pick-and-add-documents');
@@ -73,8 +78,29 @@ function App() {
         </div>
 
         {/* Table */}
-        <div className="bg-white shadow-lg rounded-2xl p-6">
-          <DocumentsTable />
+        <div className="w-full max-w-7xl space-y-6">
+
+          {/* Navigation */}
+          <div className="flex gap-4 mb-4">
+            <button onClick={() => setView('docs')} className={`px-4 py-2 rounded-full ${view==='docs' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}>
+              📄 Documents
+            </button>
+            <button onClick={() => setView('collections')} className={`px-4 py-2 rounded-full ${view==='collections' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}>
+              📚 Collections
+            </button>
+          </div>
+
+          {/* Views */}
+          {view === 'docs' && <DocumentsTable />}
+          {view === 'collections' && !selectedCollection && (
+            <Collections onOpenCollection={(col) => setSelectedCollection(col)} />
+          )}
+          {selectedCollection && (
+            <CollectionView 
+              collection={selectedCollection} 
+              onBack={() => setSelectedCollection(null)} 
+            />
+          )}
         </div>
       </div>
     </div>

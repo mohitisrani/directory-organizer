@@ -116,6 +116,16 @@ export default function DocumentsTable() {
 
   const displayedDocs = semanticResults.length > 0 ? semanticResults : filteredDocs;
 
+  const [showCollectionModal, setShowCollectionModal] = useState(false);
+  const [collections, setCollections] = useState([]);
+  const [selectedCollectionId, setSelectedCollectionId] = useState(null);
+
+  // Fetch collections
+  const refreshCollections = async () => {
+    const cols = await window.electron.invoke('get-collections');
+    setCollections(cols);
+  };
+
   return (
     <div className="space-y-4">
       <h2 className="text-2xl font-semibold text-gray-800 mb-2">Your Documents</h2>
@@ -169,6 +179,12 @@ export default function DocumentsTable() {
             className="px-3 py-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
           >
             🗑 Delete Selected
+          </button>
+          <button
+            onClick={() => { refreshCollections(); setShowCollectionModal(true); }}
+            className="px-3 py-1 bg-green-500 text-white rounded-full hover:bg-green-600 transition"
+          >
+            ➕ Add to Collection
           </button>
           <button
             onClick={clearSelection}
@@ -295,6 +311,53 @@ export default function DocumentsTable() {
 
       {/* File Preview Modal */}
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {showCollectionModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md space-y-4 shadow-lg">
+            <h2 className="text-xl font-semibold">Add to Collection</h2>
+
+            {collections.length === 0 ? (
+              <p className="text-gray-500">No collections yet. Create one in the Collections tab.</p>
+            ) : (
+              <select
+                value={selectedCollectionId || ''}
+                onChange={(e) => setSelectedCollectionId(Number(e.target.value))}
+                className="w-full border rounded-lg p-2"
+              >
+                <option value="" disabled>Select a collection</option>
+                {collections.map(col => (
+                  <option key={col.id} value={col.id}>{col.name}</option>
+                ))}
+              </select>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowCollectionModal(false)}
+                className="px-4 py-2 bg-gray-300 rounded-full hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!selectedCollectionId}
+                onClick={async () => {
+                  await window.electron.invoke('add-docs-to-collection', {
+                    collectionId: selectedCollectionId,
+                    docIds: selectedDocs
+                  });
+                  setShowCollectionModal(false);
+                  clearSelection();
+                  alert('Documents added to collection!');
+                }}
+                className="px-4 py-2 bg-blue-500 text-white rounded-full hover:bg-blue-600 disabled:bg-gray-400"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
