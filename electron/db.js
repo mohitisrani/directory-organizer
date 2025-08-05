@@ -60,4 +60,18 @@ db.prepare(`-- 2. Relationship Table (Many-to-Many)
   );
 `).run();
 
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER,
+    chunk_index INTEGER,
+    content TEXT,
+    embedding TEXT,
+    FOREIGN KEY(document_id) REFERENCES documents(id)
+  )
+`).run();
+
+db.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_docid ON document_chunks(document_id)').run();
+
+
 export default db;

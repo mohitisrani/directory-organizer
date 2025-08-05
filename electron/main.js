@@ -369,23 +369,39 @@ ipcMain.handle('generate-document-embedding', async (_, docId) => {
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
   if (!doc) return null;
 
+  // --- 1. Check if chunks already exist ---
+  const chunkExists = db.prepare('SELECT 1 FROM document_chunks WHERE document_id=? LIMIT 1').get(docId);
+  if (chunkExists) {
+    console.log(`⚡ Skipping embedding for ${doc.name}, chunks already exist.`);
+    return 0;
+  }
+
+  // --- 2. Extract text ---
   const text = await extractText(doc.path);
   if (!text.trim()) {
-    console.warn('⚠️ No text extracted for embedding:', doc.path);
+    console.warn(`⚠️ No text extracted for embedding: ${doc.path}`);
     return null;
   }
 
-  const chunks = chunkText(text, 1000, 100); // ~1k chars with 100 overlap
+  // --- 3. Split into chunks ---
+  const chunks = chunkText(text, 1000, 100);
   const model = await getEmbedder();
   let totalEmbeddings = 0;
-
-  // Remove old chunks if regenerating
-  db.prepare('DELETE FROM document_chunks WHERE document_id=?').run(docId);
+  let docVectorSum = null; // for document-level embedding
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const output = await model(chunk, { pooling: 'mean', normalize: true });
     const embedding = Array.from(output.data);
+
+    // Incremental sum for doc-level embedding
+    if (!docVectorSum) {
+      docVectorSum = embedding.slice();
+    } else {
+      for (let j = 0; j < embedding.length; j++) {
+        docVectorSum[j] += embedding[j];
+      }
+    }
 
     db.prepare(`
       INSERT INTO document_chunks (document_id, chunk_index, content, embedding)
@@ -395,13 +411,16 @@ ipcMain.handle('generate-document-embedding', async (_, docId) => {
     totalEmbeddings++;
   }
 
-  console.log(`✅ Generated ${totalEmbeddings} chunk embeddings for ${doc.name}`);
+  // --- 4. Save document-level embedding as the average ---
+  if (docVectorSum) {
+    const avgEmbedding = docVectorSum.map(v => v / totalEmbeddings);
+    db.prepare('UPDATE documents SET embedding=? WHERE id=?')
+      .run(JSON.stringify(avgEmbedding), docId);
+  }
 
-  // Keep doc.embedding as NULL for now to not break existing logic
+  console.log(`✅ Generated ${totalEmbeddings} chunk embeddings for ${doc.name}`);
   return totalEmbeddings;
 });
-
-
 
 // Cosine similarity
 function cosineSimilarity(vecA, vecB) {
