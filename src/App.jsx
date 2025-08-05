@@ -82,11 +82,24 @@ function App() {
 
           {/* Navigation */}
           <div className="flex gap-4 mb-4">
-            <button onClick={() => setView('docs')} className={`px-4 py-2 rounded-full ${view==='docs' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}>
-              📄 Documents
-            </button>
-            <button onClick={() => setView('collections')} className={`px-4 py-2 rounded-full ${view==='collections' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}>
-              📚 Collections
+            <button
+              onClick={() => {
+                setView('docs');
+                setSelectedCollection(null); // ✅ Reset collection
+              }}
+              className={`px-4 py-2 rounded-full ${view==='docs' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              >
+                📄 Documents
+              </button>
+
+              <button
+                onClick={() => {
+                  setView('collections');
+                  // Optional: Keep selectedCollection if you want auto-resume
+                }}
+                className={`px-4 py-2 rounded-full ${view==='collections' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+              >
+                📚 Collections
             </button>
           </div>
 
