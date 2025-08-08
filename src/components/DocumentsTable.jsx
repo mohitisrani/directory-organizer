@@ -28,7 +28,7 @@ export default function DocumentsTable() {
       })
     );
     setDocuments(checked);
-  
+
     // ✅ Generate embeddings for any docs that don't have them
     for (const doc of checked) {
       if (!doc.embedding) {
@@ -67,12 +67,12 @@ export default function DocumentsTable() {
     const fileData = await window.electron.invoke('read-file-content', filePath);
     setPreviewFile({ ...fileData, name });
   };
-  
+
   const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
 
   const handleTagAdd = (doc, e) => {
     if (e.key === 'Enter' && e.target.value.trim() !== '') {
-      const newTags = doc.tags ? doc.tags.split(',').map(t => t.trim()) : [];
+      const newTags = doc.tags ? doc.tags.split(',').map((t) => t.trim()) : [];
       newTags.push(e.target.value.trim());
       const tagStr = newTags.join(', ');
       updateDocument(doc.id, { tags: tagStr });
@@ -83,28 +83,28 @@ export default function DocumentsTable() {
   const handleTagRemove = (doc, tag) => {
     const newTags = doc.tags
       .split(',')
-      .map(t => t.trim())
-      .filter(t => t !== tag)
+      .map((t) => t.trim())
+      .filter((t) => t !== tag)
       .join(', ');
     updateDocument(doc.id, { tags: newTags });
   };
 
   // ---------- Multi-Select ----------
   const toggleSelect = (docId) => {
-    setSelectedDocs(prev => 
-      prev.includes(docId) ? prev.filter(id => id !== docId) : [...prev, docId]
+    setSelectedDocs((prev) =>
+      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
     );
   };
 
   const selectAll = () => {
-    const ids = displayedDocs.map(doc => doc.id);
+    const ids = displayedDocs.map((doc) => doc.id);
     setSelectedDocs(ids);
   };
 
   const clearSelection = () => setSelectedDocs([]);
 
   // ---------- Filtering ----------
-  const filteredDocs = documents.filter(doc => {
+  const filteredDocs = documents.filter((doc) => {
     const query = searchQuery.toLowerCase();
     return (
       (doc.name || '').toLowerCase().includes(query) ||
@@ -159,8 +159,8 @@ export default function DocumentsTable() {
       {semanticResults.length > 0 && (
         <div className="text-sm text-indigo-600 font-medium mb-2">
           Showing top {semanticResults.length} semantic matches for "{semanticQuery}"
-          <button 
-            onClick={() => setSemanticResults([])} 
+          <button
+            onClick={() => setSemanticResults([])}
             className="ml-2 text-red-500 hover:underline"
           >
             Clear
@@ -171,9 +171,7 @@ export default function DocumentsTable() {
       {/* Bulk Action Toolbar */}
       {selectedDocs.length > 0 && (
         <div className="flex gap-2 mb-4 items-center">
-          <span className="text-sm text-gray-600">
-            {selectedDocs.length} selected
-          </span>
+          <span className="text-sm text-gray-600">{selectedDocs.length} selected</span>
           <button
             onClick={deleteSelectedDocuments}
             className="px-3 py-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
@@ -181,7 +179,10 @@ export default function DocumentsTable() {
             🗑 Delete Selected
           </button>
           <button
-            onClick={() => { refreshCollections(); setShowCollectionModal(true); }}
+            onClick={() => {
+              refreshCollections();
+              setShowCollectionModal(true);
+            }}
             className="px-3 py-1 bg-green-500 text-white rounded-full hover:bg-green-600 transition"
           >
             ➕ Add to Collection
@@ -200,19 +201,17 @@ export default function DocumentsTable() {
           <thead className="bg-gray-50 text-gray-700 text-sm">
             <tr>
               <th className="p-3 text-center">
-                <input 
+                <input
                   type="checkbox"
                   checked={selectedDocs.length === displayedDocs.length && displayedDocs.length > 0}
-                  onChange={(e) => e.target.checked ? selectAll() : clearSelection()}
+                  onChange={(e) => (e.target.checked ? selectAll() : clearSelection())}
                 />
               </th>
               <th className="p-3 text-left">File Name</th>
               <th className="p-3 text-left">Path</th>
               <th className="p-3 text-left">Category</th>
               <th className="p-3 text-left">Tags</th>
-              {semanticResults.length > 0 && (
-                <th className="p-3 text-left">Snippet</th>
-              )}
+              {semanticResults.length > 0 && <th className="p-3 text-left">Snippet</th>}
               <th className="p-3 text-center">Missing?</th>
               <th className="p-3 text-center">Actions</th>
             </tr>
@@ -240,25 +239,28 @@ export default function DocumentsTable() {
                     onChange={(e) => updateDocument(doc.id, { category: e.target.value })}
                     className="w-full border rounded-full p-1 px-2 text-sm shadow-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
                   >
-                    {CATEGORY_OPTIONS.map(cat => (
-                      <option key={cat} value={cat}>{cat}</option>
+                    {CATEGORY_OPTIONS.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
                     ))}
                   </select>
                 </td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-1 mb-1">
-                    {doc.tags && doc.tags.split(',').map(tag => (
-                      <span
-                        key={tag}
-                        className="flex items-center bg-gradient-to-r from-blue-100 to-blue-200 text-blue-800 px-2 py-1 rounded-full text-xs shadow-sm hover:shadow transition"
-                      >
-                        {tag}
-                        <XMarkIcon
-                          className="w-4 h-4 ml-1 cursor-pointer hover:text-red-500 transition-transform hover:scale-110"
-                          onClick={() => handleTagRemove(doc, tag)}
-                        />
-                      </span>
-                    ))}
+                    {doc.tags &&
+                      doc.tags.split(',').map((tag) => (
+                        <span
+                          key={tag}
+                          className="flex items-center bg-gradient-to-r from-blue-100 to-blue-200 text-blue-800 px-2 py-1 rounded-full text-xs shadow-sm hover:shadow transition"
+                        >
+                          {tag}
+                          <XMarkIcon
+                            className="w-4 h-4 ml-1 cursor-pointer hover:text-red-500 transition-transform hover:scale-110"
+                            onClick={() => handleTagRemove(doc, tag)}
+                          />
+                        </span>
+                      ))}
                   </div>
                   <input
                     type="text"
@@ -268,34 +270,32 @@ export default function DocumentsTable() {
                   />
                 </td>
                 {semanticResults.length > 0 && (
-                  <td className="p-3 text-xs text-gray-600 max-w-xs truncate" title={doc.snippet}>
-                    {doc.snippet && (
-                      <span className="italic">
-                        “{doc.snippet}”
-                      </span>
-                    )}
+                  <td
+                    className="p-3 text-xs text-gray-600 max-w-xs truncate"
+                    title={doc.snippet}
+                  >
+                    {doc.snippet && <span className="italic">“{doc.snippet}”</span>}
                   </td>
                 )}
                 <td className="p-3 text-center font-semibold">
                   {doc.missing ? '⚠️ Missing' : 'No'}
                 </td>
                 <td className="p-3 text-center space-x-2">
-                  <button 
+                  <button
                     onClick={() => viewFile(doc.path, doc.name)}
-                    className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 
-                                transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
+                    className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
                     title="Preview File"
                   >
                     <EyeIcon className="w-4 h-4" />
                   </button>
-                  <button 
+                  <button
                     onClick={() => showInFinder(doc.path)}
                     className="p-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition"
                     title="Show in Finder"
                   >
                     <FolderIcon className="w-4 h-4" />
                   </button>
-                  <button 
+                  <button
                     onClick={() => deleteDocument(doc.id)}
                     className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
                     title="Delete Document"
@@ -325,9 +325,13 @@ export default function DocumentsTable() {
                 onChange={(e) => setSelectedCollectionId(Number(e.target.value))}
                 className="w-full border rounded-lg p-2"
               >
-                <option value="" disabled>Select a collection</option>
-                {collections.map(col => (
-                  <option key={col.id} value={col.id}>{col.name}</option>
+                <option value="" disabled>
+                  Select a collection
+                </option>
+                {collections.map((col) => (
+                  <option key={col.id} value={col.id}>
+                    {col.name}
+                  </option>
                 ))}
               </select>
             )}
@@ -344,7 +348,7 @@ export default function DocumentsTable() {
                 onClick={async () => {
                   await window.electron.invoke('add-docs-to-collection', {
                     collectionId: selectedCollectionId,
-                    docIds: selectedDocs
+                    docIds: selectedDocs,
                   });
                   setShowCollectionModal(false);
                   clearSelection();

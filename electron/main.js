@@ -1,4 +1,3 @@
-
 // ======================= IMPORTS =======================
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
@@ -13,12 +12,17 @@ import pdf from 'pdf-parse';
 import { PDFDocument } from 'pdf-lib';
 import Tesseract from 'tesseract.js';
 
+import { registerCollectionIpc } from './collection-ipc.js';
+
+
 // ======================= GLOBALS =======================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow;
 let embedder = null;
+// NEW: cached local generator
+let generator = null;
 
 // ======================= WINDOW CREATION =======================
 function createWindow() {
@@ -64,6 +68,15 @@ async function getEmbedder() {
     embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
   }
   return embedder;
+}
+
+// NEW: local text generator
+async function getGenerator() {
+  if (!generator) {
+    // Use base for better quality; switch to small if resource-constrained
+    generator = await pipeline('text2text-generation', 'Xenova/flan-t5-base');
+  }
+  return generator;
 }
 
 function chunkText(text, chunkSize = 1000, overlap = 100) {
@@ -132,6 +145,59 @@ async function generateEmbedding(text) {
   const model = await getEmbedder();
   const output = await model(text, { pooling: 'mean', normalize: true });
   return Array.from(output.data);
+}
+
+// NEW: retrieve top chunks across docs (with per-doc diversity)
+async function retrieveTopChunks(query, topK = 6) {
+  const qEmbed = await generateEmbedding(query);
+  if (!qEmbed) return [];
+
+  const chunks = db.prepare('SELECT * FROM document_chunks').all();
+  if (chunks.length === 0) return [];
+
+  const scored = chunks.map(ch => ({
+    ...ch,
+    score: cosineSimilarity(qEmbed, JSON.parse(ch.embedding))
+  })).sort((a, b) => b.score - a.score);
+
+  // Take up to 2 best chunks per doc to diversify, then trim to topK
+  const perDoc = new Map();
+  for (const ch of scored) {
+    const arr = perDoc.get(ch.document_id) || [];
+    if (arr.length < 2) {
+      arr.push(ch);
+      perDoc.set(ch.document_id, arr);
+    }
+  }
+
+  const diversified = Array.from(perDoc.values()).flat().sort((a, b) => b.score - a.score);
+  return diversified.slice(0, topK);
+}
+
+registerCollectionIpc({ db, generateEmbedding, cosineSimilarity });
+
+// NEW: build compact prompt
+function buildPrompt(question, contexts) {
+  const MAX_CTX = 3200;
+  let contextText = '';
+  for (const c of contexts) {
+    const add = `\n[Snippet #${c.idx}]\n${c.content}\n`;
+    if ((contextText + add).length > MAX_CTX) break;
+    contextText += add;
+  }
+
+  return `
+You are a careful assistant answering strictly from the provided snippets.
+- If the answer isn't in the snippets, say you don't know.
+- Keep it concise. Cite snippet numbers like [#1], [#2] when relevant.
+
+Question: ${question}
+
+Context:
+${contextText}
+
+Answer:
+`.trim();
 }
 
 // ======================= IPC HANDLERS =======================
@@ -291,8 +357,7 @@ ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
 // -- Collections CRUD --
 ipcMain.handle('get-collections', () => db.prepare('SELECT * FROM collections ORDER BY createdAt DESC').all());
 ipcMain.handle('create-collection', (_, { name, description = '', color = null }) => {
-  const info = db.prepare('INSERT INTO collections (name, description, color) VALUES (?, ?, ?)')
-    .run(name, description, color);
+  const info = db.prepare('INSERT INTO collections (name, description, color) VALUES (?, ?, ?)').run(name, description, color);
   return { id: info.lastInsertRowid, name, description, color };
 });
 ipcMain.handle('delete-collection', (_, collectionId) => {
@@ -309,8 +374,7 @@ ipcMain.handle('add-docs-to-collection', (_, { collectionId, docIds }) => {
   return true;
 });
 ipcMain.handle('remove-doc-from-collection', (_, { collectionId, docId }) => {
-  db.prepare('DELETE FROM collection_documents WHERE collection_id=? AND document_id=?')
-    .run(collectionId, docId);
+  db.prepare('DELETE FROM collection_documents WHERE collection_id=? AND document_id=?').run(collectionId, docId);
   return true;
 });
 
@@ -328,4 +392,38 @@ ipcMain.handle('import-db', async () => {
   fs.copyFileSync(filePaths[0], path.join(__dirname, '..', 'database.sqlite'));
   mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
   return true;
+});
+
+// ======================= RAG IPC (LOCAL) =======================
+// NEW: local, offline RAG endpoint
+ipcMain.handle('rag-answer', async (_, question) => {
+  try {
+    const contexts = await retrieveTopChunks(question, 6);
+    if (contexts.length === 0) {
+      return { answer: "I couldn't find anything relevant in your documents.", sources: [] };
+    }
+
+    const indexed = contexts.map((c, i) => ({ ...c, idx: i + 1 }));
+    const prompt = buildPrompt(
+      question,
+      indexed.map(c => ({ content: c.content }))
+    );
+
+    const gen = await getGenerator();
+    const out = await gen(prompt, { max_new_tokens: 180, temperature: 0.2 });
+
+    const sources = indexed.map(c => {
+      const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(c.document_id);
+      return {
+        idx: c.idx,
+        docName: doc?.name ?? `Document ${c.document_id}`,
+        score: Number(c.score.toFixed(3)),
+        preview: c.content.slice(0, 180).replace(/\s+/g, ' ') + (c.content.length > 180 ? '…' : '')
+      };
+    });
+
+    return { answer: out[0].generated_text.trim(), sources };
+  } catch (e) {
+    return { answer: `Error: ${e.message}`, sources: [] };
+  }
 });

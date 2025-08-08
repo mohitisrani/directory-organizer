@@ -1,0 +1,2001 @@
+
+# ./tailwind.config.js
+export default {
+    content: [
+      "./index.html",
+      "./src/**/*.{js,jsx,ts,tsx}",
+    ],
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+        },
+      },
+    },
+    plugins: [],
+  };
+  
+# ./vite.config.js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+
+// Electron typically serves from src as root
+export default defineConfig({
+  root: './src',
+  base: './',
+  plugins: [react(), tailwindcss()],
+  build: {
+    outDir: '../dist',
+  },
+});
+
+# ./files.sh
+
+echo "" > all_files.txt
+
+find . \
+  -type f \
+  ! -path "*/node_modules/*" \
+  ! -path "*/.git/*" \
+  ! -path "*/test/*" \
+  ! -path "*/package-lock.json" \
+  ! -path "*/database.sqlite" \
+  ! -path "*/all_files.txt" \
+  ! -path "*/next_steps.txt" \
+  ! -path "*/clipboard.txt" \
+  ! -path "*/.gitignore" \
+  ! -path "*/eng.traineddata" \
+  | while read file; do
+      echo "# ${file#/path/to/root/}"
+      echo "# ${file#/path/to/root/}" >> all_files.txt
+      cat "$file" >> all_files.txt
+      echo "" >> all_files.txt
+    done
+
+# ./package.json
+{
+  "name": "deep-docs",
+  "version": "0.0.1",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev:react": "vite",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "start": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
+    "postinstall": "electron-rebuild",
+    "migrate:chunks": "node electron/migrate_chunks.js"
+  },
+  "dependencies": {
+    "@headlessui/react": "^2.2.7",
+    "@heroicons/react": "^2.2.0",
+    "@xenova/transformers": "^2.17.2",
+    "archiver": "^6.0.2",
+    "better-sqlite3": "^9.6.0",
+    "electron": "^29.0.0",
+    "mammoth": "^1.10.0",
+    "openai": "^5.11.0",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pdf-poppler": "^0.2.1",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "sqlite": "^5.1.1",
+    "tesseract.js": "^6.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.11",
+    "@tailwindcss/postcss": "^4.1.11",
+    "@tailwindcss/vite": "^4.1.11",
+    "@vitejs/plugin-react": "^4.0.0",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^8.0.0",
+    "electron-rebuild": "^3.2.9",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.11",
+    "vite": "^5.0.0",
+    "wait-on": "^7.0.0"
+  }
+}
+
+# ./electron/preload.js
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electron', {
+  invoke: (channel, data) => ipcRenderer.invoke(channel, data),
+  on: (channel, func) => ipcRenderer.on(channel, (event, ...args) => func(...args)),
+  removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
+});
+# ./electron/migrate_chunks.js
+// electron/migrate_chunks.js
+import db from './db.js';
+import fs from 'fs';
+import path from 'path';
+import { pipeline } from '@xenova/transformers';
+import pdf from 'pdf-parse';
+import Tesseract from 'tesseract.js';
+import { execSync } from 'child_process';
+
+// ------------------ DB MIGRATION ------------------
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER ON DELETE CASCADE,
+    chunk_index INTEGER,
+    content TEXT,
+    embedding TEXT,
+    FOREIGN KEY(document_id) REFERENCES documents(id)
+  )
+`).run();
+
+db.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_docid ON document_chunks(document_id)').run();
+
+console.log('✅ document_chunks table ensured.');
+
+// ------------------ EMBEDDING UTILITIES ------------------
+
+async function getEmbedder() {
+  if (!global.embedder) {
+    global.embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return global.embedder;
+}
+
+function chunkText(text, chunkSize = 1000, overlap = 100) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    chunks.push(text.slice(start, end));
+    start += chunkSize - overlap;
+  }
+  return chunks;
+}
+
+async function extractText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (!fs.existsSync(filePath)) return '';
+
+  // Simple text formats
+  if (['.txt', '.md', '.csv', '.json', '.log'].includes(ext)) {
+    return fs.readFileSync(filePath, 'utf-8').slice(0, 50000);
+  }
+
+  // PDF parsing
+  if (ext === '.pdf') {
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdf(dataBuffer);
+    let text = (pdfData.text || '').trim();
+
+    // Fallback to OCR if minimal text
+    if (text.length < 50) {
+      console.log('⚡ OCR fallback for:', filePath);
+      const tempDir = path.join(process.cwd(), 'ocr-temp');
+      if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+      execSync(`pdftoppm "${filePath}" "${tempDir}/page" -png`);
+      const pngFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.png'));
+      for (const pngFile of pngFiles) {
+        const imgPath = path.join(tempDir, pngFile);
+        const { data: { text: ocrText } } = await Tesseract.recognize(imgPath, 'eng');
+        text += '\n' + ocrText;
+        fs.unlinkSync(imgPath);
+      }
+    }
+
+    return text.slice(0, 50000);
+  }
+
+  return '';
+}
+
+async function generateEmbedding(text) {
+  const embedder = await getEmbedder();
+  const output = await embedder(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
+}
+
+// ------------------ MIGRATION PROCESS ------------------
+
+async function migrateAllDocuments() {
+  const docs = db.prepare('SELECT * FROM documents').all();
+  console.log(`📄 Found ${docs.length} documents to migrate...`);
+
+  for (const doc of docs) {
+    // Skip if already chunked
+    const chunkExists = db.prepare(
+      'SELECT 1 FROM document_chunks WHERE document_id=? LIMIT 1'
+    ).get(doc.id);
+    if (chunkExists) {
+      console.log(`⏩ Skipping ${doc.name}, chunks already exist.`);
+      continue;
+    }
+
+    const text = await extractText(doc.path);
+    if (!text.trim()) {
+      console.warn(`⚠️ Skipping ${doc.name}, no text extracted.`);
+      continue;
+    }
+
+    const chunks = chunkText(text, 1000, 100);
+    console.log(`📑 ${doc.name} → ${chunks.length} chunks`);
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const embedding = await generateEmbedding(chunk);
+
+      db.prepare(`
+        INSERT INTO document_chunks (document_id, chunk_index, content, embedding)
+        VALUES (?, ?, ?, ?)
+      `).run(doc.id, i, chunk, JSON.stringify(embedding));
+    }
+
+    console.log(`✅ Migrated ${doc.name}`);
+  }
+
+  console.log('🎉 Migration complete! All documents now have chunked embeddings.');
+}
+
+migrateAllDocuments().then(() => process.exit(0));
+
+# ./electron/db.js
+// electron/db.js
+import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import pdf from 'pdf-parse';
+import { pipeline } from '@xenova/transformers';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const dbPath = path.join(__dirname, '..', 'database.sqlite');
+const db = new Database(dbPath);
+
+// Create table with new columns for phase 3
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    path TEXT UNIQUE,
+    size INTEGER,
+    lastModified TEXT,
+    category TEXT DEFAULT '',
+    tags TEXT DEFAULT '',
+    embedding TEXT DEFAULT NULL  -- store JSON array of embedding
+  )
+`).run();
+
+try { db.prepare('ALTER TABLE documents ADD COLUMN embedding TEXT DEFAULT NULL').run(); } catch {}
+
+
+// Migration in case old DB exists
+try {
+  db.prepare('ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ""').run();
+} catch {}
+try {
+  db.prepare('ALTER TABLE documents ADD COLUMN tags TEXT DEFAULT ""').run();
+} catch {}
+
+db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)').run();
+db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_lastModified ON documents(lastModified)').run();
+
+db.prepare(`
+  -- 1. Collections Table
+  CREATE TABLE IF NOT EXISTS collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      color TEXT DEFAULT NULL,
+      createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`).run();
+
+db.prepare(`-- 2. Relationship Table (Many-to-Many)
+  CREATE TABLE IF NOT EXISTS collection_documents (
+      collection_id INTEGER,
+      document_id INTEGER ON DELETE CASCADE,
+      PRIMARY KEY (collection_id, document_id),
+      FOREIGN KEY (collection_id) REFERENCES collections(id),
+      FOREIGN KEY (document_id) REFERENCES documents(id)
+  );
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER ON DELETE CASCADE,
+    chunk_index INTEGER,
+    content TEXT,
+    embedding TEXT,
+    FOREIGN KEY(document_id) REFERENCES documents(id)
+  )
+`).run();
+
+db.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_docid ON document_chunks(document_id)').run();
+
+
+export default db;
+
+# ./electron/collection-ipc.js
+// electron/collection-ipc.js (TAILORED FOR `documents.path`)
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import archiver from 'archiver';
+import { ipcMain, dialog, shell } from 'electron';
+
+// --- helpers ---
+function safeFilename(name) {
+  return String(name || '').replace(/[\/\\?%*:|"<>]/g, '_').trim() || 'file';
+}
+
+export function registerCollectionIpc({ db, generateEmbedding, cosineSimilarity }) {
+  // Your schema: documents(id, name, path, size, lastModified, category, tags, embedding)
+  const selectDocsSQL = `
+    SELECT d.id, d.name, d.path
+    FROM documents d
+    JOIN collection_documents cd ON d.id = cd.document_id
+    WHERE cd.collection_id = ?
+  `;
+
+  // ---- Export to Folder ----
+  ipcMain.handle('export-collection-to-folder', async (_, collectionId) => {
+    const { filePaths, canceled } = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (canceled || filePaths.length === 0) return { ok: false };
+
+    const destDir = filePaths[0];
+    const docs = db.prepare(selectDocsSQL).all(collectionId);
+
+    let copied = 0;
+    for (const doc of docs) {
+      const p = doc?.path;
+      if (!p || !fs.existsSync(p)) continue;
+
+      const base = safeFilename(doc.name || path.basename(p));
+      let target = path.join(destDir, base);
+
+      if (fs.existsSync(target)) {
+        const ext = path.extname(base);
+        const stem = path.basename(base, ext);
+        const hash = crypto.createHash('md5').update(p).digest('hex').slice(0, 6);
+        target = path.join(destDir, `${stem}-${hash}${ext}`);
+      }
+      fs.copyFileSync(p, target);
+      copied++;
+    }
+    return { ok: true, count: copied, destDir };
+  });
+
+  // ---- Export ZIP ----
+  ipcMain.handle('export-collection-zip', async (_, collectionId) => {
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      title: 'Export Collection as ZIP',
+      defaultPath: 'collection.zip',
+      filters: [{ name: 'Zip', extensions: ['zip'] }]
+    });
+    if (canceled || !filePath) return { ok: false };
+
+    const output = fs.createWriteStream(filePath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(output);
+
+    const docs = db.prepare(selectDocsSQL).all(collectionId);
+    let added = 0;
+
+    for (const doc of docs) {
+      const p = doc?.path;
+      if (!p || !fs.existsSync(p)) continue;
+      const entryName = safeFilename(doc.name || path.basename(p));
+      archive.file(p, { name: entryName });
+      added++;
+    }
+
+    await archive.finalize();
+    await new Promise((resolve, reject) => {
+      output.on('close', resolve);
+      output.on('error', reject);
+    });
+
+    return { ok: true, filePath, count: added };
+  });
+
+  // ---- Export CSV ----
+  ipcMain.handle('export-collection-csv', async (_, collectionId) => {
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      title: 'Export Collection CSV',
+      defaultPath: 'collection.csv',
+      filters: [{ name: 'CSV', extensions: ['csv'] }]
+    });
+    if (canceled || !filePath) return { ok: false };
+
+    const rows = db.prepare(`
+      SELECT d.id, d.name, d.path
+      FROM documents d
+      JOIN collection_documents cd ON d.id = cd.document_id
+      WHERE cd.collection_id = ?
+    `).all(collectionId);
+
+    const header = 'id,name,path';
+    const csv = [header, ...rows.map(r =>
+      [r.id, r.name, r.path]
+        .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
+    )].join('\n');
+
+    fs.writeFileSync(filePath, csv, 'utf-8');
+    return { ok: true, filePath, count: rows.length };
+  });
+
+  // ---- Reveal All in Finder/Explorer ----
+  ipcMain.handle('reveal-collection-in-finder', async (_, collectionId) => {
+    const docs = db.prepare(selectDocsSQL).all(collectionId);
+    for (const doc of docs) {
+      const p = doc?.path;
+      if (p && fs.existsSync(p)) shell.showItemInFolder(p);
+    }
+    return true;
+  });
+
+  // ---- Update Collection Metadata (optional UI) ----
+  ipcMain.handle('update-collection', (_, { id, name, description, color }) => {
+    const stmt = db.prepare('UPDATE collections SET name=COALESCE(?, name), description=COALESCE(?, description), color=COALESCE(?, color) WHERE id=?');
+    stmt.run(name ?? null, description ?? null, color ?? null, id);
+    return true;
+  });
+
+  // ---- Semantic Search within a Collection (unchanged) ----
+  ipcMain.handle('semantic-search-in-collection', async (_, { collectionId, query, topK = 5 }) => {
+    if (!generateEmbedding || !cosineSimilarity) return [];
+    const qEmbed = await generateEmbedding(query);
+    if (!qEmbed) return [];
+
+    const ids = db.prepare(
+      'SELECT document_id AS id FROM collection_documents WHERE collection_id=?'
+    ).all(collectionId).map(r => r.id);
+    if (ids.length === 0) return [];
+
+    const placeholders = ids.map(() => '?').join(',');
+    const chunks = db.prepare(
+      `SELECT * FROM document_chunks WHERE document_id IN (${placeholders})`
+    ).all(...ids);
+
+    const scored = chunks.map(c => ({
+      ...c,
+      score: cosineSimilarity(qEmbed, JSON.parse(c.embedding))
+    }));
+
+    const bestByDoc = {};
+    for (const ch of scored) {
+      if (!bestByDoc[ch.document_id] || bestByDoc[ch.document_id].score < ch.score) {
+        bestByDoc[ch.document_id] = ch;
+      }
+    }
+
+    const results = Object.values(bestByDoc)
+      .sort((a,b) => b.score - a.score)
+      .slice(0, topK)
+      .map(ch => {
+        const d = db.prepare('SELECT * FROM documents WHERE id=?').get(ch.document_id);
+        return {
+          ...d,
+          score: ch.score,
+          snippet: (ch.content || '').slice(0, 200) + ((ch.content || '').length > 200 ? '...' : '')
+        };
+      });
+
+    return results;
+  });
+}
+
+# ./electron/main.js
+// ======================= IMPORTS =======================
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { execSync } from 'child_process';
+
+// Third-party libraries
+import db from './db.js';
+import { pipeline } from '@xenova/transformers';
+import pdf from 'pdf-parse';
+import { PDFDocument } from 'pdf-lib';
+import Tesseract from 'tesseract.js';
+
+import { registerCollectionIpc } from './collection-ipc.js';
+
+
+// ======================= GLOBALS =======================
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let mainWindow;
+let embedder = null;
+// NEW: cached local generator
+let generator = null;
+
+// ======================= WINDOW CREATION =======================
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 900,
+    height: 650,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  mainWindow.loadURL('http://localhost:5173');
+}
+
+app.whenReady().then(() => {
+  createWindow();
+});
+
+// ======================= UTILITY FUNCTIONS =======================
+function getFileMetadata(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    return { size: stats.size, lastModified: stats.mtime.toISOString() };
+  } catch {
+    return { size: null, lastModified: null };
+  }
+}
+
+function getAllFiles(dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  let files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) files = files.concat(getAllFiles(fullPath));
+    else files.push(fullPath);
+  }
+  return files;
+}
+
+async function getEmbedder() {
+  if (!embedder) {
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return embedder;
+}
+
+// NEW: local text generator
+async function getGenerator() {
+  if (!generator) {
+    // Use base for better quality; switch to small if resource-constrained
+    generator = await pipeline('text2text-generation', 'Xenova/flan-t5-base');
+  }
+  return generator;
+}
+
+function chunkText(text, chunkSize = 1000, overlap = 100) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    chunks.push(text.slice(start, end));
+    start += chunkSize - overlap;
+  }
+  return chunks;
+}
+
+function cosineSimilarity(vecA, vecB) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+async function extractText(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return '';
+    const ext = path.extname(filePath).toLowerCase();
+
+    // Text files
+    if (['.txt', '.md', '.csv', '.json', '.log'].includes(ext)) {
+      return fs.readFileSync(filePath, 'utf-8').slice(0, 20000);
+    }
+
+    // PDF files
+    if (ext === '.pdf') {
+      const absPath = path.resolve(filePath);
+      const dataBuffer = fs.readFileSync(absPath);
+      const pdfData = await pdf(dataBuffer);
+      let extractedText = (pdfData.text || '').trim();
+
+      // Fallback to OCR if minimal text
+      if (extractedText.length < 50) {
+        const tempDir = path.join(__dirname, 'ocr-temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+        execSync(`pdftoppm "${absPath}" "${tempDir}/page" -png`);
+        const pngFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.png'));
+        for (const pngFile of pngFiles) {
+          const imgPath = path.join(tempDir, pngFile);
+          const { data: { text } } = await Tesseract.recognize(imgPath, 'eng');
+          extractedText += '\n' + text;
+          fs.unlinkSync(imgPath);
+        }
+      }
+
+      return extractedText.slice(0, 20000);
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+async function generateEmbedding(text) {
+  if (!text || !text.trim()) return null;
+  const model = await getEmbedder();
+  const output = await model(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
+}
+
+// NEW: retrieve top chunks across docs (with per-doc diversity)
+async function retrieveTopChunks(query, topK = 6) {
+  const qEmbed = await generateEmbedding(query);
+  if (!qEmbed) return [];
+
+  const chunks = db.prepare('SELECT * FROM document_chunks').all();
+  if (chunks.length === 0) return [];
+
+  const scored = chunks.map(ch => ({
+    ...ch,
+    score: cosineSimilarity(qEmbed, JSON.parse(ch.embedding))
+  })).sort((a, b) => b.score - a.score);
+
+  // Take up to 2 best chunks per doc to diversify, then trim to topK
+  const perDoc = new Map();
+  for (const ch of scored) {
+    const arr = perDoc.get(ch.document_id) || [];
+    if (arr.length < 2) {
+      arr.push(ch);
+      perDoc.set(ch.document_id, arr);
+    }
+  }
+
+  const diversified = Array.from(perDoc.values()).flat().sort((a, b) => b.score - a.score);
+  return diversified.slice(0, topK);
+}
+
+registerCollectionIpc({ db, generateEmbedding, cosineSimilarity });
+
+// NEW: build compact prompt
+function buildPrompt(question, contexts) {
+  const MAX_CTX = 3200;
+  let contextText = '';
+  for (const c of contexts) {
+    const add = `\n[Snippet #${c.idx}]\n${c.content}\n`;
+    if ((contextText + add).length > MAX_CTX) break;
+    contextText += add;
+  }
+
+  return `
+You are a careful assistant answering strictly from the provided snippets.
+- If the answer isn't in the snippets, say you don't know.
+- Keep it concise. Cite snippet numbers like [#1], [#2] when relevant.
+
+Question: ${question}
+
+Context:
+${contextText}
+
+Answer:
+`.trim();
+}
+
+// ======================= IPC HANDLERS =======================
+
+// -- Document CRUD --
+ipcMain.handle('get-documents', async () => db.prepare('SELECT * FROM documents').all());
+
+ipcMain.handle('update-document', async (_, { id, category, tags }) => {
+  if (category !== undefined) db.prepare('UPDATE documents SET category=? WHERE id=?').run(category, id);
+  if (tags !== undefined) db.prepare('UPDATE documents SET tags=? WHERE id=?').run(tags, id);
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+});
+
+ipcMain.handle('delete-document', (event, docIds) => {
+  const ids = Array.isArray(docIds) ? docIds : [docIds];
+  const deleteChunks = db.prepare('DELETE FROM document_chunks WHERE document_id = ?');
+  const deleteDoc = db.prepare('DELETE FROM documents WHERE id = ?');
+  const transaction = db.transaction((idsToDelete) => {
+    for (const id of idsToDelete) {
+      deleteChunks.run(id);
+      deleteDoc.run(id);
+    }
+  });
+  transaction(ids);
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return true;
+});
+
+// -- File Adding / Drag & Drop --
+ipcMain.handle('pick-and-add-documents', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
+  if (canceled || filePaths.length === 0) return null;
+  const insert = db.prepare('INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)');
+  const newDocs = [];
+  for (const filePath of filePaths) {
+    const fileName = path.basename(filePath);
+    const exists = db.prepare('SELECT 1 FROM documents WHERE path = ?').get(filePath);
+    if (exists) continue;
+    const meta = getFileMetadata(filePath);
+    insert.run(fileName, filePath, meta.size, meta.lastModified);
+    const doc = db.prepare('SELECT * FROM documents WHERE path = ?').get(filePath);
+    newDocs.push(doc);
+  }
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return newDocs;
+});
+
+ipcMain.handle('pick-directory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return;
+  const dirPath = result.filePaths[0];
+  const filePaths = getAllFiles(dirPath);
+  const insert = db.prepare('INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)');
+  for (const filePath of filePaths) {
+    const meta = getFileMetadata(filePath);
+    insert.run(path.basename(filePath), filePath, meta.size, meta.lastModified);
+  }
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return db.prepare('SELECT * FROM documents').all();
+});
+
+ipcMain.handle('add-dropped-files', (event, filePaths) => {
+  const insert = db.prepare('INSERT OR IGNORE INTO documents (name, path, size, lastModified) VALUES (?, ?, ?, ?)');
+  function processPath(p) {
+    const stats = fs.statSync(p);
+    if (stats.isDirectory()) fs.readdirSync(p).forEach(entry => processPath(path.join(p, entry)));
+    else {
+      const meta = getFileMetadata(p);
+      insert.run(path.basename(p), p, meta.size, meta.lastModified);
+    }
+  }
+  filePaths.forEach(processPath);
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return db.prepare('SELECT * FROM documents').all();
+});
+
+// -- File Operations --
+ipcMain.handle('file-exists', (_, filePath) => fs.existsSync(filePath));
+ipcMain.handle('show-in-finder', (_, filePath) => shell.showItemInFolder(filePath));
+ipcMain.handle('open-file', async (_, filePath) => shell.openPath(filePath));
+
+ipcMain.handle('read-file-content', async (_, filePath) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    if (['.txt', '.md', '.json', '.log', '.csv'].includes(ext))
+      return { type: 'text', content: fs.readFileSync(filePath, 'utf-8').slice(0, 5000) };
+    if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext))
+      return { type: 'image', content: `data:image/${ext.replace('.', '')};base64,${fs.readFileSync(filePath).toString('base64')}` };
+    if (ext === '.pdf')
+      return { type: 'pdf', content: `data:application/pdf;base64,${fs.readFileSync(filePath).toString('base64')}` };
+    return { type: 'unsupported', content: null };
+  } catch {
+    return { type: 'error', content: null };
+  }
+});
+
+ipcMain.handle('check-missing-files', () => {
+  const docs = db.prepare('SELECT * FROM documents').all();
+  const missing = [];
+  for (const doc of docs) if (!fs.existsSync(doc.path)) missing.push(doc.id);
+  if (missing.length > 0) db.prepare(`DELETE FROM documents WHERE id IN (${missing.join(',')})`).run();
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return missing.length;
+});
+
+// -- Embeddings & Semantic Search --
+ipcMain.handle('generate-document-embedding', async (_, docId) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
+  if (!doc) return null;
+  const chunkExists = db.prepare('SELECT 1 FROM document_chunks WHERE document_id=? LIMIT 1').get(docId);
+  if (chunkExists) return 0;
+  const text = await extractText(doc.path);
+  if (!text.trim()) return null;
+  const chunks = chunkText(text, 1000, 100);
+  const model = await getEmbedder();
+  let totalEmbeddings = 0;
+  let docVectorSum = null;
+  for (let i = 0; i < chunks.length; i++) {
+    const output = await model(chunks[i], { pooling: 'mean', normalize: true });
+    const embedding = Array.from(output.data);
+    if (!docVectorSum) docVectorSum = embedding.slice();
+    else for (let j = 0; j < embedding.length; j++) docVectorSum[j] += embedding[j];
+    db.prepare('INSERT INTO document_chunks (document_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)')
+      .run(docId, i, chunks[i], JSON.stringify(embedding));
+    totalEmbeddings++;
+  }
+  if (docVectorSum) {
+    const avgEmbedding = docVectorSum.map(v => v / totalEmbeddings);
+    db.prepare('UPDATE documents SET embedding=? WHERE id=?').run(JSON.stringify(avgEmbedding), docId);
+  }
+  return totalEmbeddings;
+});
+
+ipcMain.handle('semantic-search', async (_, query, topK = 5) => {
+  const qEmbed = await generateEmbedding(query);
+  if (!qEmbed) return [];
+  const chunks = db.prepare('SELECT * FROM document_chunks').all();
+  if (chunks.length === 0) return [];
+  const scoredChunks = chunks.map(chunk => ({
+    ...chunk,
+    score: cosineSimilarity(qEmbed, JSON.parse(chunk.embedding))
+  }));
+  const bestChunksByDoc = {};
+  for (const chunk of scoredChunks) {
+    const docId = chunk.document_id;
+    if (!bestChunksByDoc[docId] || bestChunksByDoc[docId].score < chunk.score) bestChunksByDoc[docId] = chunk;
+  }
+  return Object.values(bestChunksByDoc)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK)
+    .map(chunk => {
+      const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(chunk.document_id);
+      return { ...doc, score: chunk.score, snippet: chunk.content.slice(0, 200) + (chunk.content.length > 200 ? '...' : '') };
+    });
+});
+
+// -- Collections CRUD --
+ipcMain.handle('get-collections', () => db.prepare('SELECT * FROM collections ORDER BY createdAt DESC').all());
+ipcMain.handle('create-collection', (_, { name, description = '', color = null }) => {
+  const info = db.prepare('INSERT INTO collections (name, description, color) VALUES (?, ?, ?)').run(name, description, color);
+  return { id: info.lastInsertRowid, name, description, color };
+});
+ipcMain.handle('delete-collection', (_, collectionId) => {
+  db.prepare('DELETE FROM collection_documents WHERE collection_id=?').run(collectionId);
+  db.prepare('DELETE FROM collections WHERE id=?').run(collectionId);
+  return true;
+});
+ipcMain.handle('get-collection-docs', (_, collectionId) => db.prepare(
+  'SELECT d.* FROM documents d JOIN collection_documents cd ON d.id = cd.document_id WHERE cd.collection_id=?'
+).all(collectionId));
+ipcMain.handle('add-docs-to-collection', (_, { collectionId, docIds }) => {
+  const insert = db.prepare('INSERT OR IGNORE INTO collection_documents (collection_id, document_id) VALUES (?, ?)');
+  db.transaction(ids => { for (const docId of ids) insert.run(collectionId, docId); })(docIds);
+  return true;
+});
+ipcMain.handle('remove-doc-from-collection', (_, { collectionId, docId }) => {
+  db.prepare('DELETE FROM collection_documents WHERE collection_id=? AND document_id=?').run(collectionId, docId);
+  return true;
+});
+
+// -- DB Import/Export --
+ipcMain.handle('export-db', async () => {
+  const { filePath } = await dialog.showSaveDialog({ title: 'Export Database', defaultPath: 'documents-backup.sqlite', filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }] });
+  if (!filePath) return false;
+  fs.copyFileSync(path.join(__dirname, '..', 'database.sqlite'), filePath);
+  return true;
+});
+
+ipcMain.handle('import-db', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'SQLite DB', extensions: ['sqlite'] }] });
+  if (canceled || filePaths.length === 0) return false;
+  fs.copyFileSync(filePaths[0], path.join(__dirname, '..', 'database.sqlite'));
+  mainWindow.webContents.send('documents-updated', db.prepare('SELECT * FROM documents').all());
+  return true;
+});
+
+// ======================= RAG IPC (LOCAL) =======================
+// NEW: local, offline RAG endpoint
+ipcMain.handle('rag-answer', async (_, question) => {
+  try {
+    const contexts = await retrieveTopChunks(question, 6);
+    if (contexts.length === 0) {
+      return { answer: "I couldn't find anything relevant in your documents.", sources: [] };
+    }
+
+    const indexed = contexts.map((c, i) => ({ ...c, idx: i + 1 }));
+    const prompt = buildPrompt(
+      question,
+      indexed.map(c => ({ content: c.content }))
+    );
+
+    const gen = await getGenerator();
+    const out = await gen(prompt, { max_new_tokens: 180, temperature: 0.2 });
+
+    const sources = indexed.map(c => {
+      const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(c.document_id);
+      return {
+        idx: c.idx,
+        docName: doc?.name ?? `Document ${c.document_id}`,
+        score: Number(c.score.toFixed(3)),
+        preview: c.content.slice(0, 180).replace(/\s+/g, ' ') + (c.content.length > 180 ? '…' : '')
+      };
+    });
+
+    return { answer: out[0].generated_text.trim(), sources };
+  } catch (e) {
+    return { answer: `Error: ${e.message}`, sources: [] };
+  }
+});
+
+# ./postcss.config.js
+export default {
+    plugins: {
+      '@tailwindcss/postcss': {},
+      autoprefixer: {},
+    },
+  };
+  
+# ./src/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deep Docs</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/main.jsx"></script>
+</body>
+</html>
+
+# ./src/index.css
+@import "tailwindcss";
+
+html, body, #root {
+height: 100%;
+margin: 0;
+font-family: 'Roboto', sans-serif;
+background-color: #f5f7fa;
+}
+
+h1 {
+margin-bottom: 20px;
+}
+
+button {
+cursor: pointer;
+}
+
+.MuiTable-root th {
+background-color: #f0f2f5;
+font-weight: bold;
+}
+
+.MuiTableRow-root:hover {
+background-color: #f9fafb;
+}
+
+.drag-over {
+border: 2px dashed #736efe;
+background-color: rgba(115, 110, 254, 0.05);
+
+pointer-events: none;
+}
+.drag-over * {
+pointer-events: auto;
+}
+
+.chip-container {
+display: flex;
+flex-wrap: wrap;
+gap: 4px;
+}
+
+.chip-container .MuiChip-root {
+margin: 2px;
+}
+
+.add-tag-input {
+width: 80px;
+margin-top: 2px;
+}
+
+.action-buttons button {
+min-width: 30px;
+margin-right: 2px;
+}
+
+
+# ./src/components/ui/Modal.jsx
+// renderer/ui/Modal.jsx
+import React from 'react';
+
+export default function Modal({ open, title, children, onClose, actions }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md p-4">
+        <div className="text-lg font-semibold mb-2">{title}</div>
+        <div className="space-y-3">{children}</div>
+        <div className="mt-4 flex justify-end gap-2">
+          {actions}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+# ./src/components/DocumentsTable.jsx
+import React, { useState, useEffect } from 'react';
+import FilePreviewModal from './FilePreviewModal.jsx';
+import { EyeIcon, FolderIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/solid';
+
+const CATEGORY_OPTIONS = ['Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'];
+
+export default function DocumentsTable() {
+  const [documents, setDocuments] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [previewFile, setPreviewFile] = useState(null);
+  const [semanticQuery, setSemanticQuery] = useState('');
+  const [semanticResults, setSemanticResults] = useState([]);
+  const [selectedDocs, setSelectedDocs] = useState([]);
+
+  const runSemanticSearch = async () => {
+    if (!semanticQuery.trim()) return;
+    const results = await window.electron.invoke('semantic-search', semanticQuery, 5);
+    setSemanticResults(results);
+    setSelectedDocs([]); // clear selection on new search
+  };
+
+  const refreshDocuments = async () => {
+    const docs = await window.electron.invoke('get-documents');
+    const checked = await Promise.all(
+      docs.map(async (doc) => {
+        const exists = await window.electron.invoke('file-exists', doc.path);
+        return { ...doc, missing: !exists };
+      })
+    );
+    setDocuments(checked);
+
+    // ✅ Generate embeddings for any docs that don't have them
+    for (const doc of checked) {
+      if (!doc.embedding) {
+        await window.electron.invoke('generate-document-embedding', doc.id);
+      }
+    }
+  };
+
+  useEffect(() => {
+    refreshDocuments();
+    const listener = () => refreshDocuments();
+    window.electron.on('documents-updated', listener);
+    return () => {};
+  }, []);
+
+  const updateDocument = (id, data) => {
+    window.electron.invoke('update-document', { id, ...data });
+  };
+
+  const deleteDocument = (id) => {
+    if (confirm('Are you sure you want to delete this document from the database?')) {
+      window.electron.invoke('delete-document', id);
+    }
+  };
+
+  const deleteSelectedDocuments = async () => {
+    if (selectedDocs.length === 0) return;
+    if (!confirm(`Delete ${selectedDocs.length} selected documents?`)) return;
+    for (const id of selectedDocs) {
+      await window.electron.invoke('delete-document', id);
+    }
+    setSelectedDocs([]);
+  };
+
+  const viewFile = async (filePath, name) => {
+    const fileData = await window.electron.invoke('read-file-content', filePath);
+    setPreviewFile({ ...fileData, name });
+  };
+
+  const showInFinder = (filePath) => window.electron.invoke('show-in-finder', filePath);
+
+  const handleTagAdd = (doc, e) => {
+    if (e.key === 'Enter' && e.target.value.trim() !== '') {
+      const newTags = doc.tags ? doc.tags.split(',').map((t) => t.trim()) : [];
+      newTags.push(e.target.value.trim());
+      const tagStr = newTags.join(', ');
+      updateDocument(doc.id, { tags: tagStr });
+      e.target.value = '';
+    }
+  };
+
+  const handleTagRemove = (doc, tag) => {
+    const newTags = doc.tags
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t !== tag)
+      .join(', ');
+    updateDocument(doc.id, { tags: newTags });
+  };
+
+  // ---------- Multi-Select ----------
+  const toggleSelect = (docId) => {
+    setSelectedDocs((prev) =>
+      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
+    );
+  };
+
+  const selectAll = () => {
+    const ids = displayedDocs.map((doc) => doc.id);
+    setSelectedDocs(ids);
+  };
+
+  const clearSelection = () => setSelectedDocs([]);
+
+  // ---------- Filtering ----------
+  const filteredDocs = documents.filter((doc) => {
+    const query = searchQuery.toLowerCase();
+    return (
+      (doc.name || '').toLowerCase().includes(query) ||
+      (doc.path || '').toLowerCase().includes(query) ||
+      (doc.category || '').toLowerCase().includes(query) ||
+      (doc.tags || '').toLowerCase().includes(query)
+    );
+  });
+
+  const displayedDocs = semanticResults.length > 0 ? semanticResults : filteredDocs;
+
+  const [showCollectionModal, setShowCollectionModal] = useState(false);
+  const [collections, setCollections] = useState([]);
+  const [selectedCollectionId, setSelectedCollectionId] = useState(null);
+
+  // Fetch collections
+  const refreshCollections = async () => {
+    const cols = await window.electron.invoke('get-collections');
+    setCollections(cols);
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-2xl font-semibold text-gray-800 mb-2">Your Documents</h2>
+
+      {/* Text search */}
+      <input
+        type="text"
+        placeholder="Search by name, path, category, or tags..."
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        className="w-full p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+      />
+
+      {/* Semantic search */}
+      <div className="flex gap-2 my-4">
+        <input
+          type="text"
+          placeholder="Ask in natural language..."
+          value={semanticQuery}
+          onChange={(e) => setSemanticQuery(e.target.value)}
+          className="flex-1 p-3 border rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+        />
+        <button
+          onClick={runSemanticSearch}
+          className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
+        >
+          🔍 Semantic Search
+        </button>
+      </div>
+
+      {semanticResults.length > 0 && (
+        <div className="text-sm text-indigo-600 font-medium mb-2">
+          Showing top {semanticResults.length} semantic matches for "{semanticQuery}"
+          <button
+            onClick={() => setSemanticResults([])}
+            className="ml-2 text-red-500 hover:underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
+      {/* Bulk Action Toolbar */}
+      {selectedDocs.length > 0 && (
+        <div className="flex gap-2 mb-4 items-center">
+          <span className="text-sm text-gray-600">{selectedDocs.length} selected</span>
+          <button
+            onClick={deleteSelectedDocuments}
+            className="px-3 py-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
+          >
+            🗑 Delete Selected
+          </button>
+          <button
+            onClick={() => {
+              refreshCollections();
+              setShowCollectionModal(true);
+            }}
+            className="px-3 py-1 bg-green-500 text-white rounded-full hover:bg-green-600 transition"
+          >
+            ➕ Add to Collection
+          </button>
+          <button
+            onClick={clearSelection}
+            className="px-3 py-1 bg-gray-400 text-white rounded-full hover:bg-gray-500 transition"
+          >
+            ✖ Clear Selection
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded-2xl shadow-sm border border-gray-200">
+        <table className="min-w-full border-collapse overflow-hidden rounded-2xl">
+          <thead className="bg-gray-50 text-gray-700 text-sm">
+            <tr>
+              <th className="p-3 text-center">
+                <input
+                  type="checkbox"
+                  checked={selectedDocs.length === displayedDocs.length && displayedDocs.length > 0}
+                  onChange={(e) => (e.target.checked ? selectAll() : clearSelection())}
+                />
+              </th>
+              <th className="p-3 text-left">File Name</th>
+              <th className="p-3 text-left">Path</th>
+              <th className="p-3 text-left">Category</th>
+              <th className="p-3 text-left">Tags</th>
+              {semanticResults.length > 0 && <th className="p-3 text-left">Snippet</th>}
+              <th className="p-3 text-center">Missing?</th>
+              <th className="p-3 text-center">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayedDocs.map((doc, idx) => (
+              <tr
+                key={doc.id}
+                className={`border-t border-gray-100 hover:bg-gray-50 transition ${
+                  idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                } ${doc.missing ? 'bg-red-50' : ''}`}
+              >
+                <td className="p-3 text-center">
+                  <input
+                    type="checkbox"
+                    checked={selectedDocs.includes(doc.id)}
+                    onChange={() => toggleSelect(doc.id)}
+                  />
+                </td>
+                <td className="p-3 font-medium text-gray-800">{doc.name}</td>
+                <td className="p-3 text-xs text-gray-500">{doc.path}</td>
+                <td className="p-3">
+                  <select
+                    defaultValue={doc.category || 'Other'}
+                    onChange={(e) => updateDocument(doc.id, { category: e.target.value })}
+                    className="w-full border rounded-full p-1 px-2 text-sm shadow-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  >
+                    {CATEGORY_OPTIONS.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td className="p-3">
+                  <div className="flex flex-wrap gap-1 mb-1">
+                    {doc.tags &&
+                      doc.tags.split(',').map((tag) => (
+                        <span
+                          key={tag}
+                          className="flex items-center bg-gradient-to-r from-blue-100 to-blue-200 text-blue-800 px-2 py-1 rounded-full text-xs shadow-sm hover:shadow transition"
+                        >
+                          {tag}
+                          <XMarkIcon
+                            className="w-4 h-4 ml-1 cursor-pointer hover:text-red-500 transition-transform hover:scale-110"
+                            onClick={() => handleTagRemove(doc, tag)}
+                          />
+                        </span>
+                      ))}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Add tag..."
+                    onKeyDown={(e) => handleTagAdd(doc, e)}
+                    className="w-full border rounded-full p-1 px-2 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                </td>
+                {semanticResults.length > 0 && (
+                  <td
+                    className="p-3 text-xs text-gray-600 max-w-xs truncate"
+                    title={doc.snippet}
+                  >
+                    {doc.snippet && <span className="italic">“{doc.snippet}”</span>}
+                  </td>
+                )}
+                <td className="p-3 text-center font-semibold">
+                  {doc.missing ? '⚠️ Missing' : 'No'}
+                </td>
+                <td className="p-3 text-center space-x-2">
+                  <button
+                    onClick={() => viewFile(doc.path, doc.name)}
+                    className="p-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition-transform hover:scale-110 hover:rotate-3 hover:shadow-lg"
+                    title="Preview File"
+                  >
+                    <EyeIcon className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => showInFinder(doc.path)}
+                    className="p-2 bg-gray-500 text-white rounded-full hover:bg-gray-600 transition"
+                    title="Show in Finder"
+                  >
+                    <FolderIcon className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => deleteDocument(doc.id)}
+                    className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition"
+                    title="Delete Document"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* File Preview Modal */}
+      <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {showCollectionModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md space-y-4 shadow-lg">
+            <h2 className="text-xl font-semibold">Add to Collection</h2>
+
+            {collections.length === 0 ? (
+              <p className="text-gray-500">No collections yet. Create one in the Collections tab.</p>
+            ) : (
+              <select
+                value={selectedCollectionId || ''}
+                onChange={(e) => setSelectedCollectionId(Number(e.target.value))}
+                className="w-full border rounded-lg p-2"
+              >
+                <option value="" disabled>
+                  Select a collection
+                </option>
+                {collections.map((col) => (
+                  <option key={col.id} value={col.id}>
+                    {col.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowCollectionModal(false)}
+                className="px-4 py-2 bg-gray-300 rounded-full hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!selectedCollectionId}
+                onClick={async () => {
+                  await window.electron.invoke('add-docs-to-collection', {
+                    collectionId: selectedCollectionId,
+                    docIds: selectedDocs,
+                  });
+                  setShowCollectionModal(false);
+                  clearSelection();
+                  alert('Documents added to collection!');
+                }}
+                className="px-4 py-2 bg-blue-500 text-white rounded-full hover:bg-blue-600 disabled:bg-gray-400"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+# ./src/components/Collections.jsx
+// renderer/Collections.jsx (no prompt/confirm)
+import React, { useEffect, useState } from 'react';
+import CollectionView from './CollectionView';
+import Modal from './ui/Modal';
+
+export default function Collections() {
+  const [collections, setCollections] = useState([]);
+  const [active, setActive] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  // modal state
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState(null);
+  const [form, setForm] = useState({ name: '', description: '', color: '#6366F1' });
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState(null);
+
+  async function refresh() {
+    setLoading(true);
+    const res = await window.electron.invoke('get-collections');
+    setCollections(res || []);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  function openCreate() {
+    setForm({ name: '', description: '', color: '#6366F1' });
+    setCreateOpen(true);
+  }
+  async function doCreate() {
+    if (!form.name.trim()) return;
+    await window.electron.invoke('create-collection', { name: form.name, description: form.description, color: form.color });
+    setCreateOpen(false);
+    refresh();
+  }
+
+  function openEdit(c) {
+    setEditTarget(c);
+    setForm({ name: c.name || '', description: c.description || '', color: c.color || '#6366F1' });
+    setEditOpen(true);
+  }
+  async function doEdit() {
+    await window.electron.invoke('update-collection', { id: editTarget.id, ...form });
+    setEditOpen(false);
+    refresh();
+  }
+
+  function openConfirm(c) {
+    setConfirmTarget(c);
+    setConfirmOpen(true);
+  }
+  async function doDelete() {
+    await window.electron.invoke('delete-collection', confirmTarget.id);
+    setConfirmOpen(false);
+    refresh();
+  }
+
+  if (active) {
+    return <CollectionView collection={active} onBack={() => { setActive(null); refresh(); }} />;
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-semibold">Collections</h2>
+        <button onClick={openCreate} className="px-3 py-1 rounded-full bg-black text-white">
+          + New
+        </button>
+      </div>
+
+      <div className="divide-y rounded-xl border">
+        {loading ? (
+          <div className="p-4">Loading…</div>
+        ) : collections.length === 0 ? (
+          <div className="p-4 text-slate-500">No collections yet.</div>
+        ) : (
+          collections.map((c) => (
+            <div key={c.id} className="p-4 flex items-center justify-between">
+              <div className="min-w-0">
+                <div className="font-medium truncate">
+                  <span className="inline-block w-3 h-3 rounded-full mr-2 align-middle" style={{ background: c.color || '#CBD5E1' }} />
+                  {c.name}
+                </div>
+                {c.description && <div className="text-xs text-slate-500 truncate">{c.description}</div>}
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setActive(c)} className="px-2 py-1 rounded-full border text-sm">
+                  Open
+                </button>
+                <button onClick={() => openEdit(c)} className="px-2 py-1 rounded-full border text-sm">
+                  ✏️ Edit
+                </button>
+                <button onClick={() => openConfirm(c)} className="px-2 py-1 rounded-full bg-rose-600 text-white text-sm">
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Create Modal */}
+      <Modal open={createOpen} title="New Collection" onClose={() => setCreateOpen(false)}
+        actions={<>
+          <button onClick={() => setCreateOpen(false)} className="px-3 py-1 rounded-full border">Cancel</button>
+          <button onClick={doCreate} className="px-3 py-1 rounded-full bg-black text-white">Create</button>
+        </>}
+      >
+        <label className="block text-sm">Name</label>
+        <input className="w-full border rounded-xl p-2" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+
+        <label className="block text-sm">Description</label>
+        <input className="w-full border rounded-xl p-2" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+
+        <label className="block text-sm">Color</label>
+        <input type="color" className="w-16 h-8 p-0 border rounded" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} />
+      </Modal>
+
+      {/* Edit Modal */}
+      <Modal open={editOpen} title="Edit Collection" onClose={() => setEditOpen(false)}
+        actions={<>
+          <button onClick={() => setEditOpen(false)} className="px-3 py-1 rounded-full border">Cancel</button>
+          <button onClick={doEdit} className="px-3 py-1 rounded-full bg-black text-white">Save</button>
+        </>}
+      >
+        <label className="block text-sm">Name</label>
+        <input className="w-full border rounded-xl p-2" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+
+        <label className="block text-sm">Description</label>
+        <input className="w-full border rounded-xl p-2" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+
+        <label className="block text-sm">Color</label>
+        <input type="color" className="w-16 h-8 p-0 border rounded" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} />
+      </Modal>
+
+      {/* Confirm Delete Modal */}
+      <Modal open={confirmOpen} title="Delete collection?" onClose={() => setConfirmOpen(false)}
+        actions={<>
+          <button onClick={() => setConfirmOpen(false)} className="px-3 py-1 rounded-full border">Cancel</button>
+          <button onClick={doDelete} className="px-3 py-1 rounded-full bg-rose-600 text-white">Delete</button>
+        </>}
+      >
+        <div className="text-sm text-slate-600">
+          This action deletes the collection (not the files). Continue?
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+# ./src/components/CollectionView.jsx
+import { useEffect, useState } from 'react';
+
+export default function CollectionView({ collection, onBack }) {
+  const [docs, setDocs] = useState([]);
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const refreshDocs = async () => {
+    const data = await window.electron.invoke('get-collection-docs', collection.id);
+    setDocs(data);
+  };
+
+  const removeDoc = async (docId) => {
+    await window.electron.invoke('remove-doc-from-collection', { collectionId: collection.id, docId });
+    refreshDocs();
+  };
+
+  const exportToFolder = async () => {
+    const res = await window.electron.invoke('export-collection-to-folder', collection.id);
+    if (res?.ok) alert(`Exported ${res.count} files to ${res.destDir}`);
+  };
+
+  const exportZip = async () => {
+    const res = await window.electron.invoke('export-collection-zip', collection.id);
+    if (res?.ok) alert(`ZIP saved: ${res.filePath}`);
+  };
+
+  const exportCSV = async () => {
+    const res = await window.electron.invoke('export-collection-csv', collection.id);
+    if (res?.ok) alert(`CSV saved: ${res.filePath}`);
+  };
+
+  const revealAll = async () => {
+    await window.electron.invoke('reveal-collection-in-finder', collection.id);
+  };
+
+  const runSearch = async () => {
+    const query = q.trim();
+    if (!query) return;
+    setLoading(true);
+    const res = await window.electron.invoke('semantic-search-in-collection', {
+      collectionId: collection.id,
+      query,
+      topK: 8,
+    });
+    setResults(res || []);
+    setLoading(false);
+  };
+
+  useEffect(() => { refreshDocs(); }, [collection]);
+
+  const items = results.length > 0 ? results : docs;
+
+  // simple stats
+  const totalSize = (items || []).reduce((a, d) => a + (d.size || 0), 0);
+  const prettyMB = (totalSize / (1024 * 1024)).toFixed(1);
+
+  return (
+    <div className="p-4 space-y-4">
+      <button onClick={onBack} className="text-blue-500 hover:underline">⬅ Back to Collections</button>
+      <div className="flex items-center justify-between gap-4">
+        <h2 className="text-2xl font-semibold">{collection.name}</h2>
+
+        <div className="flex flex-wrap gap-2">
+          <button onClick={exportToFolder} className="px-3 py-1 bg-green-600 text-white rounded-full">📁 Export to Folder</button>
+          <button onClick={exportZip} className="px-3 py-1 bg-indigo-600 text-white rounded-full">🗜️ Export ZIP</button>
+          <button onClick={exportCSV} className="px-3 py-1 bg-slate-700 text-white rounded-full">📄 Export CSV</button>
+          <button onClick={revealAll} className="px-3 py-1 bg-gray-600 text-white rounded-full">🔎 Reveal Files</button>
+        </div>
+      </div>
+
+      <div className="text-sm text-gray-500">
+        {items.length} docs • ~{prettyMB} MB {results.length > 0 && <span className="text-indigo-600">• results for “{q}”</span>}
+      </div>
+
+      {/* Search in this collection */}
+      <div className="flex gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Semantic search in this collection…"
+          className="border rounded-full p-2 flex-1"
+        />
+        <button onClick={runSearch} disabled={loading} className="px-3 py-1 bg-indigo-500 text-white rounded-full">
+          {loading ? 'Searching…' : '🔍 Search'}
+        </button>
+        {results.length > 0 && (
+          <button onClick={() => { setResults([]); setQ(''); }} className="px-3 py-1 bg-gray-200 rounded-full">
+            Clear
+          </button>
+        )}
+      </div>
+
+      <ul className="divide-y divide-gray-200">
+        {items.map(doc => (
+          <li key={doc.id} className="flex justify-between items-center py-2">
+            <div className="min-w-0">
+              <div className="font-medium truncate">{doc.name}</div>
+              <div className="text-xs text-gray-500 truncate">{doc.path}</div>
+              {doc.snippet && (
+                <div className="text-xs text-indigo-700 italic truncate">“{doc.snippet}”</div>
+              )}
+            </div>
+            <button
+              onClick={() => removeDoc(doc.id)}
+              className="text-red-500 hover:text-red-700"
+            >
+              Remove
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+# ./src/components/Chat.jsx
+import { useState, useRef, useEffect } from 'react';
+
+export default function Chat() {
+  const [messages, setMessages] = useState([
+    {
+      role: 'assistant',
+      text:
+        "Ask me questions about your files. I’ll retrieve the most relevant snippets and answer using only those. If something isn’t in your docs, I’ll say so.",
+    },
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    }
+  }, [messages, loading]);
+
+  const send = async () => {
+    const q = input.trim();
+    if (!q || loading) return;
+
+    setMessages((m) => [...m, { role: 'user', text: q }]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      const res = await window.electron.invoke('rag-answer', q);
+      setMessages((m) => [
+        ...m,
+        {
+          role: 'assistant',
+          text: res?.answer || 'Sorry, something went wrong.',
+          sources: res?.sources || [],
+        },
+      ]);
+    } catch (e) {
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', text: `Error: ${e.message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-[70vh] bg-white rounded-2xl shadow p-4">
+      {/* Messages */}
+      <div
+        ref={listRef}
+        className="flex-1 overflow-auto space-y-3 pr-2"
+      >
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            className={`max-w-[80%] rounded-2xl p-3 shadow-sm ${
+              m.role === 'user'
+                ? 'ml-auto bg-indigo-600 text-white'
+                : 'mr-auto bg-gray-100 text-gray-900'
+            }`}
+          >
+            <div className="whitespace-pre-wrap">{m.text}</div>
+
+            {/* Sources */}
+            {m.role === 'assistant' && m.sources && m.sources.length > 0 && (
+              <div className="mt-2 text-xs text-gray-700">
+                <div className="font-semibold mb-1">Sources</div>
+                <ul className="list-disc ml-4 space-y-1">
+                  {m.sources.map((s) => (
+                    <li key={s.idx}>
+                      <span className="font-mono mr-1">[{s.idx}]</span>
+                      <span className="font-medium">{s.docName}</span>
+                      <span className="ml-2 text-gray-500">score {s.score}</span>
+                      <div className="italic text-gray-500">
+                        {s.preview}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {loading && (
+          <div className="mr-auto bg-gray-100 text-gray-900 rounded-2xl p-3 shadow-sm">
+            Thinking…
+          </div>
+        )}
+      </div>
+
+      {/* Composer */}
+      <div className="mt-3 flex gap-2">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Ask about your documents…"
+          className="flex-1 border rounded-2xl p-3 resize-none h-14 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+        />
+        <button
+          onClick={send}
+          disabled={loading || !input.trim()}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-2xl shadow hover:bg-indigo-700 disabled:bg-gray-400"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+# ./src/components/FilePreviewModal.jsx
+import React from 'react';
+
+export default function FilePreviewModal({ file, onClose }) {
+  if (!file) return null;
+
+  const { type, content, name } = file;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+      <div className="bg-white rounded-2xl shadow-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        
+        {/* Header */}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h2 className="text-lg font-semibold">{name} Preview</h2>
+          <button 
+            onClick={onClose} 
+            className="text-gray-500 hover:text-gray-800 transition text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-4 bg-gray-50">
+          {type === 'text' && (
+            <pre className="whitespace-pre-wrap text-sm font-mono">{content}</pre>
+          )}
+
+          {type === 'image' && (
+            <img src={content} alt="Preview" className="max-h-[70vh] mx-auto" />
+          )}
+
+          {type === 'pdf' && (
+            <iframe src={content} className="w-full h-[70vh]" title="PDF Preview" />
+          )}
+
+          {type === 'unsupported' && (
+            <p className="text-gray-500 text-center mt-10">
+              ⚠️ This file type is not supported for preview.
+            </p>
+          )}
+
+          {type === 'error' && (
+            <p className="text-red-500 text-center mt-10">
+              ❌ Could not load file content.
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+# ./src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+# ./src/App.jsx
+import { useState } from 'react';
+import DocumentsTable from './components/DocumentsTable.jsx';
+import Collections from './components/Collections.jsx';
+import CollectionView from './components/CollectionView.jsx';
+import Chat from './components/Chat.jsx';
+
+function App() {
+  const [view, setView] = useState('docs');
+  const [selectedCollection, setSelectedCollection] = useState(null);
+
+  const addDocumentsFromFiles = async () => {
+    const newDocs = await window.electron.invoke('pick-and-add-documents');
+    if (!newDocs || newDocs.length === 0) return;
+    for (const doc of newDocs) {
+      await window.electron.invoke('generate-document-embedding', doc.id);
+    }
+  };
+
+  const pickDirectory = async () => {
+    const addedDocs = await window.electron.invoke('pick-directory');
+    if (!addedDocs) return;
+    for (const doc of addedDocs) {
+      await window.electron.invoke('generate-document-embedding', doc.id);
+    }
+  };
+
+  const checkMissingFiles = async () => {
+    const removedCount = await window.electron.invoke('check-missing-files');
+    alert(`Removed ${removedCount} missing files from database.`);
+  };
+
+  const exportDB = () => window.electron.invoke('export-db');
+  const importDB = () => window.electron.invoke('import-db');
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    const files = [...e.dataTransfer.files].map((f) => f.path);
+    await window.electron.invoke('add-dropped-files', files);
+  };
+
+  return (
+    <div
+      className="min-h-screen bg-gray-100 flex justify-center p-6 font-sans"
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
+    >
+      <div className="w-full max-w-7xl space-y-6">
+        {/* Header */}
+        <div className="bg-white shadow-md rounded-2xl p-8 flex flex-col items-center">
+          <h1 className="text-4xl font-semibold text-gray-800 mb-1 flex items-center gap-2">
+            📂 DeepDocs
+          </h1>
+          <p className="text-gray-500 text-sm">
+            Organize, tag, and manage your files — now with local chat ✨
+          </p>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="bg-white shadow rounded-xl p-4 flex flex-wrap justify-center gap-3">
+          <button
+            onClick={addDocumentsFromFiles}
+            className="px-4 py-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition"
+          >
+            📄 Add Files
+          </button>
+          <button
+            onClick={pickDirectory}
+            className="px-4 py-2 bg-green-500 text-white rounded-full shadow hover:bg-green-600 transition"
+          >
+            📁 Add Directory
+          </button>
+          <button
+            onClick={checkMissingFiles}
+            className="px-4 py-2 bg-yellow-400 text-white rounded-full shadow hover:bg-yellow-500 transition"
+          >
+            🧹 Remove Missing Files
+          </button>
+          <button
+            onClick={exportDB}
+            className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
+          >
+            💾 Export DB
+          </button>
+          <button
+            onClick={importDB}
+            className="px-4 py-2 bg-purple-500 text-white rounded-full shadow hover:bg-purple-600 transition"
+          >
+            📥 Import DB
+          </button>
+        </div>
+
+        {/* Navigation */}
+        <div className="flex gap-4 mb-4">
+          <button
+            onClick={() => {
+              setView('docs');
+              setSelectedCollection(null);
+            }}
+            className={`px-4 py-2 rounded-full ${
+              view === 'docs' ? 'bg-blue-500 text-white' : 'bg-gray-200'
+            }`}
+          >
+            📄 Documents
+          </button>
+
+          <button
+            onClick={() => setView('collections')}
+            className={`px-4 py-2 rounded-full ${
+              view === 'collections' ? 'bg-blue-500 text-white' : 'bg-gray-200'
+            }`}
+          >
+            📚 Collections
+          </button>
+
+          <button
+            onClick={() => setView('chat')}
+            className={`px-4 py-2 rounded-full ${
+              view === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200'
+            }`}
+          >
+            💬 Chat with Documents
+          </button>
+        </div>
+
+        {/* Views */}
+        <div className="w-full max-w-7xl space-y-6">
+          {view === 'docs' && <DocumentsTable />}
+          {view === 'collections' && !selectedCollection && (
+            <Collections onOpenCollection={(col) => setSelectedCollection(col)} />
+          )}
+          {selectedCollection && (
+            <CollectionView
+              collection={selectedCollection}
+              onBack={() => setSelectedCollection(null)}
+            />
+          )}
+          {view === 'chat' && <Chat />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+
