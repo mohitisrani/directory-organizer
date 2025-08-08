@@ -54,3 +54,12 @@ min-width: 30px;
 margin-right: 2px;
 }
 
+.docs-drop-area.drag-over {
+    border: 2px dashed #736efe;
+    background-color: rgba(115, 110, 254, 0.05);
+    pointer-events: none;
+  }
+  
+  .docs-drop-area.drag-over * {
+    pointer-events: auto;
+  }

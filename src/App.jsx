@@ -1,13 +1,16 @@
 import { useState } from 'react';
 import DocumentsTable from './components/DocumentsTable.jsx';
 import Collections from './components/Collections.jsx';
-import CollectionView from './components/CollectionView.jsx';
 import Chat from './components/Chat.jsx';
+import DeepDocsLogo from './components/DeepDocsLogo.jsx';
+import './index.css';
+
 
 function App() {
   const [view, setView] = useState('docs');
-  const [selectedCollection, setSelectedCollection] = useState(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
+  // ---------- Handlers moved from the global header ----------
   const addDocumentsFromFiles = async () => {
     const newDocs = await window.electron.invoke('pick-and-add-documents');
     if (!newDocs || newDocs.length === 0) return;
@@ -32,110 +35,77 @@ function App() {
   const exportDB = () => window.electron.invoke('export-db');
   const importDB = () => window.electron.invoke('import-db');
 
+  // Drag & drop — only active in Documents view
   const handleDrop = async (e) => {
     e.preventDefault();
+    setIsDragOver(false);
+    if (view !== 'docs') return;
     const files = [...e.dataTransfer.files].map((f) => f.path);
     await window.electron.invoke('add-dropped-files', files);
   };
 
   return (
     <div
-      className="min-h-screen bg-gray-100 flex justify-center p-6 font-sans"
+      className={`min-h-screen bg-gray-100 flex justify-center p-6 font-sans ${
+        view === 'docs' ? 'docs-drop-area' : ''
+      } ${isDragOver && view === 'docs' ? 'drag-over' : ''}`}
       onDrop={handleDrop}
-      onDragOver={(e) => e.preventDefault()}
+      onDragOver={(e) => {
+        if (view === 'docs') {
+          e.preventDefault();
+          setIsDragOver(true);
+        }
+      }}
+      onDragLeave={() => setIsDragOver(false)}
     >
       <div className="w-full max-w-7xl space-y-6">
-        {/* Header */}
+        {/* App header */}
         <div className="bg-white shadow-md rounded-2xl p-8 flex flex-col items-center">
-          <h1 className="text-4xl font-semibold text-gray-800 mb-1 flex items-center gap-2">
-            📂 DeepDocs
-          </h1>
+          <h1 className="text-4xl font-semibold text-gray-800 mb-1 flex items-center gap-3">
+            <DeepDocsLogo className="w-10 h-10" />
+            <span>DeepDocs</span>
+           </h1>
           <p className="text-gray-500 text-sm">
             Organize, tag, and manage your files — now with local chat ✨
           </p>
-        </div>
 
-        {/* Action Buttons */}
-        <div className="bg-white shadow rounded-xl p-4 flex flex-wrap justify-center gap-3">
-          <button
-            onClick={addDocumentsFromFiles}
-            className="px-4 py-2 bg-blue-500 text-white rounded-full shadow hover:bg-blue-600 transition"
-          >
-            📄 Add Files
-          </button>
-          <button
-            onClick={pickDirectory}
-            className="px-4 py-2 bg-green-500 text-white rounded-full shadow hover:bg-green-600 transition"
-          >
-            📁 Add Directory
-          </button>
-          <button
-            onClick={checkMissingFiles}
-            className="px-4 py-2 bg-yellow-400 text-white rounded-full shadow hover:bg-yellow-500 transition"
-          >
-            🧹 Remove Missing Files
-          </button>
-          <button
-            onClick={exportDB}
-            className="px-4 py-2 bg-indigo-500 text-white rounded-full shadow hover:bg-indigo-600 transition"
-          >
-            💾 Export DB
-          </button>
-          <button
-            onClick={importDB}
-            className="px-4 py-2 bg-purple-500 text-white rounded-full shadow hover:bg-purple-600 transition"
-          >
-            📥 Import DB
-          </button>
-        </div>
-
-        {/* Navigation */}
-        <div className="flex gap-4 mb-4">
-          <button
-            onClick={() => {
-              setView('docs');
-              setSelectedCollection(null);
-            }}
-            className={`px-4 py-2 rounded-full ${
-              view === 'docs' ? 'bg-blue-500 text-white' : 'bg-gray-200'
-            }`}
-          >
-            📄 Documents
-          </button>
-
-          <button
-            onClick={() => setView('collections')}
-            className={`px-4 py-2 rounded-full ${
-              view === 'collections' ? 'bg-blue-500 text-white' : 'bg-gray-200'
-            }`}
-          >
-            📚 Collections
-          </button>
-
-          <button
-            onClick={() => setView('chat')}
-            className={`px-4 py-2 rounded-full ${
-              view === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200'
-            }`}
-          >
-            💬 Chat with Documents
-          </button>
+          {/* Top-level navigation */}
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={() => setView('docs')}
+              className={`px-4 py-2 rounded-full border ${view === 'docs' ? 'bg-black text-white' : 'bg-white'}`}
+            >
+              Documents
+            </button>
+            <button
+              onClick={() => setView('collections')}
+              className={`px-4 py-2 rounded-full border ${view === 'collections' ? 'bg-black text-white' : 'bg-white'}`}
+            >
+              Collections
+            </button>
+            <button
+              onClick={() => setView('chat')}
+              className={`px-4 py-2 rounded-full border ${view === 'chat' ? 'bg-black text-white' : 'bg-white'}`}
+            >
+              Chat
+            </button>
+          </div>
         </div>
 
         {/* Views */}
-        <div className="w-full max-w-7xl space-y-6">
-          {view === 'docs' && <DocumentsTable />}
-          {view === 'collections' && !selectedCollection && (
-            <Collections onOpenCollection={(col) => setSelectedCollection(col)} />
-          )}
-          {selectedCollection && (
-            <CollectionView
-              collection={selectedCollection}
-              onBack={() => setSelectedCollection(null)}
-            />
-          )}
-          {view === 'chat' && <Chat />}
-        </div>
+        {view === 'docs' && (
+          <DocumentsTable
+            onAddFiles={addDocumentsFromFiles}
+            onPickDirectory={pickDirectory}
+            onCheckMissing={checkMissingFiles}
+            onExportDB={exportDB}
+            onImportDB={importDB}
+          />
+        )}
+
+        {view === 'collections' && <Collections />}
+
+        {view === 'chat' && <Chat />}
       </div>
     </div>
   );

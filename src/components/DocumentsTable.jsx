@@ -4,7 +4,13 @@ import { EyeIcon, FolderIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/s
 
 const CATEGORY_OPTIONS = ['Work', 'Personal', 'Finance', 'Legal', 'Health', 'Other'];
 
-export default function DocumentsTable() {
+export default function DocumentsTable({
+  onAddFiles,
+  onPickDirectory,
+  onCheckMissing,
+  onExportDB,
+  onImportDB,
+}) {
   const [documents, setDocuments] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [previewFile, setPreviewFile] = useState(null);
@@ -128,6 +134,29 @@ export default function DocumentsTable() {
 
   return (
     <div className="space-y-4">
+      {/* 🔹 Toolbar moved inside the Documents view */}
+      <div className="bg-white rounded-2xl shadow p-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onAddFiles} className="px-3 py-1 rounded-full bg-black text-white">
+            ➕ Add Files
+          </button>
+          <button onClick={onPickDirectory} className="px-3 py-1 rounded-full border">
+            📁 Add Directory
+          </button>
+          <button onClick={onCheckMissing} className="px-3 py-1 rounded-full border">
+            🧹 Clean Missing
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onExportDB} className="px-3 py-1 rounded-full border">
+            ⬇️ Export DB
+          </button>
+          <button onClick={onImportDB} className="px-3 py-1 rounded-full border">
+            ⬆️ Import DB
+          </button>
+        </div>
+      </div>
+
       <h2 className="text-2xl font-semibold text-gray-800 mb-2">Your Documents</h2>
 
       {/* Text search */}
@@ -312,6 +341,7 @@ export default function DocumentsTable() {
       {/* File Preview Modal */}
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
 
+      {/* Add-to-Collection Modal */}
       {showCollectionModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md space-y-4 shadow-lg">

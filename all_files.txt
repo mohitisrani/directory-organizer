@@ -120,7 +120,7 @@ import { execSync } from 'child_process';
 db.prepare(`
   CREATE TABLE IF NOT EXISTS document_chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id INTEGER ON DELETE CASCADE,
+    document_id INTEGER,
     chunk_index INTEGER,
     content TEXT,
     embedding TEXT,
@@ -244,77 +244,69 @@ migrateAllDocuments().then(() => process.exit(0));
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import pdf from 'pdf-parse';
-import { pipeline } from '@xenova/transformers';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// One file DB stored at project root (adjust if you prefer elsewhere)
 const dbPath = path.join(__dirname, '..', 'database.sqlite');
 const db = new Database(dbPath);
 
-// Create table with new columns for phase 3
-db.prepare(`
+// Pragmas
+db.pragma('journal_mode = WAL');      // better write concurrency / fewer locking issues
+db.pragma('foreign_keys = ON');       // enforce FK constraints
+
+// Schema (fresh DB)
+// - ON DELETE CASCADE ensures removing a document cleans up collection links and chunks
+// - Indices speed up lookups by path, lastModified, and chunk retrieval
+db.exec(`
+  -- ===================== documents =====================
   CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    path TEXT UNIQUE,
-    size INTEGER,
-    lastModified TEXT,
-    category TEXT DEFAULT '',
-    tags TEXT DEFAULT '',
-    embedding TEXT DEFAULT NULL  -- store JSON array of embedding
-  )
-`).run();
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT,
+    path          TEXT UNIQUE,
+    size          INTEGER,
+    lastModified  TEXT,
+    category      TEXT DEFAULT '',
+    tags          TEXT DEFAULT '',
+    embedding     TEXT DEFAULT NULL   -- JSON array string of the doc-level embedding
+  );
+  CREATE INDEX IF NOT EXISTS idx_documents_path         ON documents(path);
+  CREATE INDEX IF NOT EXISTS idx_documents_lastModified ON documents(lastModified);
 
-try { db.prepare('ALTER TABLE documents ADD COLUMN embedding TEXT DEFAULT NULL').run(); } catch {}
-
-
-// Migration in case old DB exists
-try {
-  db.prepare('ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ""').run();
-} catch {}
-try {
-  db.prepare('ALTER TABLE documents ADD COLUMN tags TEXT DEFAULT ""').run();
-} catch {}
-
-db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)').run();
-db.prepare('CREATE INDEX IF NOT EXISTS idx_documents_lastModified ON documents(lastModified)').run();
-
-db.prepare(`
-  -- 1. Collections Table
+  -- ===================== collections =====================
   CREATE TABLE IF NOT EXISTS collections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      description TEXT DEFAULT '',
-      color TEXT DEFAULT NULL,
-      createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    color       TEXT DEFAULT NULL,
+    createdAt   TEXT DEFAULT CURRENT_TIMESTAMP
   );
-`).run();
 
-db.prepare(`-- 2. Relationship Table (Many-to-Many)
+  -- ============ many-to-many: collection_documents ============
   CREATE TABLE IF NOT EXISTS collection_documents (
-      collection_id INTEGER,
-      document_id INTEGER ON DELETE CASCADE,
-      PRIMARY KEY (collection_id, document_id),
-      FOREIGN KEY (collection_id) REFERENCES collections(id),
-      FOREIGN KEY (document_id) REFERENCES documents(id)
+    collection_id INTEGER NOT NULL,
+    document_id   INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, document_id),
+    FOREIGN KEY (collection_id) REFERENCES collections(id)
+      ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (document_id)   REFERENCES documents(id)
+      ON DELETE CASCADE ON UPDATE CASCADE
   );
-`).run();
 
-db.prepare(`
+  -- ===================== document_chunks =====================
   CREATE TABLE IF NOT EXISTS document_chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id INTEGER ON DELETE CASCADE,
-    chunk_index INTEGER,
-    content TEXT,
-    embedding TEXT,
-    FOREIGN KEY(document_id) REFERENCES documents(id)
-  )
-`).run();
-
-db.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_docid ON document_chunks(document_id)').run();
-
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id  INTEGER NOT NULL,
+    chunk_index  INTEGER,
+    content      TEXT,
+    embedding    TEXT,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_chunks_docid        ON document_chunks(document_id);
+  CREATE INDEX IF NOT EXISTS idx_chunks_docid_index  ON document_chunks(document_id, chunk_index);
+`);
 
 export default db;
 
